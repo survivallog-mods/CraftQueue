@@ -271,9 +271,11 @@ internal static class QueueRunner
         {
             var map = TTM().ToolTableMap;
             if (map == null) return 0;
+            long openFurn = QueueUi.CurrentToolTableFurnitureId();
             foreach (var kv in map)
             {
                 if (kv.Value == null) continue;
+                if (kv.Key == openFurn) continue;                       // 避开当前打开的台：官方 UI 对当前台 Making 弹制作遮罩并锁界面——队列走别的台（单台=关界面后开工）
                 if ((int)kv.Value.State != 0) continue;                 // 非 Idle=忙（含前台在制/没收成品）
                 var bench = IM()?.GetItemDataList(kv.Key);
                 if (bench != null && bench.Count > 0) continue;         // 台面有遗留物=前台没收，不占用

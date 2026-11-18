@@ -72,6 +72,30 @@ internal static class QueueUi
         // 逗号表达式尾部带自证标记：回执参数可判注入成败（CQ_OK/CQ_BAD）
         web.ExecuteJavaScript("(window.__CQ__||(" + boot + "),window.__CQ__?'CQ_OK':'CQ_BAD')", Ack);
 
+        // ①b 压掉队列制作的官方「正在打造」遮罩：官方 CheckResult 不分台（全局单例语义，
+        // 反汇编实证），队列在别的台制作也会推 isCrafting=true 锁前台 UI。
+        // 只在「队列有在制任务 && 当前台不在制作」时压（当前台 Making=玩家前台自己做的，不碰）。
+        try
+        {
+            var st = ToolTableState();
+            var rp = st?.IsCrafting;
+            if (rp != null && rp.Value)
+            {
+                bool qMaking = false;
+                for (int i = 0; i < QueueState.Tasks.Count; i++)
+                    if (QueueState.Tasks[i].Status == TaskStatus.Dispatched) { qMaking = true; break; }
+                if (qMaking)
+                {
+                    var furn = st.CurrentFurnitureId;
+                    var world = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.Instance;
+                    var curMaking = world != null && world._ToolTableManager != null &&
+                        world._ToolTableManager.GetToolTableState(furn) == GameCore.HotUpdate.HandMadeState.Making;
+                    if (!curMaking) rp.Value = false;
+                }
+            }
+        }
+        catch { }
+
         // ② 快照推送：签名变化才推（含精力/可做件数/刚完成标记；制作中百分比由 js 本地补间）
         var snap = QueueState.SnapshotJson();
         var sig = (int)QueueState.Stamina + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
