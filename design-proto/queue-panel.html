@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CraftQueue 原型 · 工作台制作队列</title>
+<!-- ═══════════════════════════════════════════════════════════════════
+     一次性交互原型（throwaway）：验证「加入队列」按钮与队列面板的交互语义。
+     视觉 token 逐条取自官方 ToolTable.html :root（gamekb 2026-11-12），非最终产品代码。
+     模拟：入队锁料 / 串行制作 / 精力挂起 / 缺料标红 / 取消 / 家具送玄关 /
+           抽屉满落地 / 前台拦截（E 方案）。数据全假，仅演示状态机。
+     ═══════════════════════════════════════════════════════════════════ -->
+<style>
+    :root {
+        --panel-bg: linear-gradient(168deg, rgba(34, 34, 36, 0.94) 0%, rgba(20, 20, 22, 0.96) 100%);
+        --panel-border: rgba(255, 255, 255, 0.15);
+        --slot-bg: linear-gradient(180deg, #131316 0%, #1d1d20 100%);
+        --slot-border: rgba(255, 255, 255, 0.13);
+        --text-color: #eee;
+        --text-dim: #999;
+        --title-size: 18px;
+        --accent: #FFC107;
+        --accent-glow: rgba(255, 193, 7, 0.28);
+        --btn-bg: linear-gradient(180deg, rgba(58, 58, 60, 0.9) 0%, rgba(38, 38, 40, 0.92) 100%);
+        --btn-hover: linear-gradient(180deg, rgba(72, 66, 48, 0.92) 0%, rgba(50, 46, 32, 0.95) 100%);
+        --btn-border: rgba(255, 255, 255, 0.18);
+        --craft-btn-bg: linear-gradient(180deg, rgba(168, 118, 28, 0.94) 0%, rgba(110, 76, 16, 0.96) 100%);
+        --craft-btn-hover: linear-gradient(180deg, rgba(200, 145, 40, 0.96) 0%, rgba(140, 96, 22, 0.98) 100%);
+        --workbench-overlay: linear-gradient(180deg, rgba(50, 42, 26, 0.22) 0%, transparent 45%);
+        --workbench-brushed: repeating-linear-gradient(180deg, transparent 0px, transparent 3px, rgba(255,255,255,0.012) 3px, rgba(255,255,255,0.012) 4px);
+        --danger: #e05d5d;
+        --ok: #6fbf73;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background-color: rgba(0, 0, 0, 0.55);
+        color: var(--text-color);
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        display: flex; flex-direction: column; align-items: center;
+        min-height: 100vh; padding: 14px 8px 30px;
+        user-select: none; -webkit-font-smoothing: antialiased;
+    }
+    /* ── 原型说明条（产品里不存在）── */
+    .proto-banner {
+        width: min(1180px, 96vw); margin-bottom: 10px; padding: 7px 14px;
+        background: rgba(120, 60, 10, 0.35); border: 1px solid rgba(255, 193, 7, 0.3);
+        border-radius: 8px; font-size: 12px; color: #d9c9a4; letter-spacing: 0.4px;
+        display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+    }
+    .proto-banner b { color: var(--accent); }
+    .proto-banner .sim-btn {
+        background: none; border: 1px solid rgba(255,193,7,.35); color: var(--accent);
+        font-size: 12px; padding: 2px 10px; border-radius: 5px; cursor: pointer; font-family: inherit;
+    }
+    .proto-banner .sim-btn:hover { background: rgba(255,193,7,.12); }
+
+    .ui-container { position: relative; display: flex; gap: 24px; align-items: stretch; }
+    h2 { font-size: var(--title-size); font-weight: 600; letter-spacing: 1px;
+         text-shadow: 0 2px 6px rgba(0,0,0,.6); text-align: center; width: 100%; margin-bottom: 12px; }
+
+    .panel {
+        background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 14px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.5), 0 0 1px rgba(255,255,255,.05) inset;
+        padding: 14px 16px; display: flex; flex-direction: column; align-items: center;
+    }
+    .hint-text { font-size: 12px; color: var(--text-dim); letter-spacing: .5px; margin-bottom: 10px; }
+
+    /* ── 背包（模拟料仓）── */
+    #bag-panel { width: 240px; }
+    .bag-list { width: 100%; display: flex; flex-direction: column; gap: 4px; flex: 1; overflow-y: auto; max-height: 380px; }
+    .bag-list::-webkit-scrollbar { width: 4px; }
+    .bag-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+    .bag-row { display: flex; justify-content: space-between; align-items: center;
+        background: var(--slot-bg); border: 1px solid var(--slot-border); border-radius: 6px;
+        padding: 5px 10px; font-size: 13px; }
+    .bag-row .cnt { color: var(--text-dim); font-size: 12px; }
+    .bag-row.locked { opacity: .45; }
+    .bag-row .cnt .res { color: var(--accent); }
+
+    /* ── 工作台（中栏）── */
+    #bench-panel { width: 372px; background:
+        var(--panel-bg); position: relative; }
+    #bench-panel .inner { position: relative; z-index: 1; display: flex; flex-direction: column;
+        align-items: center; width: 100%; padding: inherit; border-radius: inherit; }
+    #bench-panel .inner::before { content:''; position: absolute; inset: 0; border-radius: inherit;
+        background: var(--workbench-overlay), var(--workbench-brushed); pointer-events: none; }
+
+    .product-preview { width: 92%; margin-top: 6px; display: flex; align-items: center; gap: 10px;
+        background: var(--slot-bg); border: 1px solid var(--slot-border); border-radius: 8px;
+        padding: 8px 12px; visibility: hidden; }
+    .product-preview.show { visibility: visible; }
+    .pp-slot { width: 40px; height: 40px; border-radius: 7px; background: rgba(255,255,255,.05);
+        display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .pp-name { font-size: 14px; font-weight: 600; }
+    .pp-mats { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+    .pp-mats .short { color: var(--danger); }
+
+    .qty-row { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; height: 30px; }
+    .qty-step { display: flex; align-items: center; background: var(--slot-bg);
+        border: 1px solid var(--slot-border); border-radius: 7px; overflow: hidden; }
+    .qty-step button { width: 30px; height: 30px; background: none; border: none; color: var(--text-dim);
+        font-size: 16px; cursor: pointer; }
+    .qty-step button:hover { color: var(--accent); }
+    .qty-step input { width: 46px; height: 30px; background: none; border: none; color: var(--text-color);
+        text-align: center; font-size: 14px; font-family: inherit; outline: none; }
+
+    .craft-controls { display: flex; align-items: center; justify-content: center;
+        margin-top: 14px; padding-top: 12px; gap: 12px; width: 100%; position: relative; }
+    .craft-controls::before { content:''; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent); }
+
+    .btn { background: var(--btn-bg); color: #dde2f0; border: 1px solid var(--btn-border);
+        padding: 8px 22px; border-radius: 7px; font-size: 13px; font-weight: 500; letter-spacing: .5px;
+        cursor: pointer; transition: all .2s; box-shadow: 0 3px 10px rgba(0,0,0,.3); font-family: inherit; }
+    .btn:hover { background: var(--btn-hover); color: #fff; border-color: var(--accent);
+        transform: translateY(-1px); box-shadow: 0 5px 14px rgba(0,0,0,.35), 0 0 12px var(--accent-glow); }
+    .btn:active { transform: translateY(1px); }
+
+    #btn-craft { background: var(--craft-btn-bg); border-color: rgba(255,193,7,.55); color: #fff5d6;
+        font-size: 15px; font-weight: 700; letter-spacing: 1.5px; padding: 10px 34px; border-radius: 8px;
+        text-shadow: 0 1px 2px rgba(0,0,0,.55); }
+
+    /* 加入队列：官方制造的从属操作 → 描边金，弱于实心金 */
+    #btn-enqueue { color: var(--accent); border-color: rgba(255,193,7,.5); background: rgba(255,193,7,.06);
+        font-weight: 600; }
+    #btn-enqueue:hover { background: rgba(255,193,7,.14); border-color: var(--accent); color: #ffd75e; }
+    #btn-enqueue:disabled, #btn-enqueue:disabled:hover { opacity: .4; cursor: not-allowed;
+        background: var(--btn-bg); border-color: var(--btn-border); color: var(--text-dim);
+        transform: none; box-shadow: none; }
+
+    /* ── 制造笔记（右栏：配方选择）── */
+    #notes-panel { width: 250px; align-items: stretch; }
+    .recipe-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 400px; }
+    .recipe-list::-webkit-scrollbar { width: 4px; }
+    .recipe-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+    .recipe-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+        background: var(--slot-bg); border: 1px solid var(--slot-border); border-radius: 8px;
+        cursor: pointer; transition: border-color .15s, background .15s; }
+    .recipe-item:hover { border-color: rgba(255,193,7,.45); }
+    .recipe-item.sel { border-color: var(--accent); background: rgba(255,193,7,.08);
+        box-shadow: 0 0 10px var(--accent-glow); }
+    .ri-icon { width: 34px; height: 34px; border-radius: 6px; background: rgba(255,255,255,.05);
+        display: flex; align-items: center; justify-content: center; font-size: 19px; flex: none; }
+    .ri-name { font-size: 13px; font-weight: 600; }
+    .ri-mats { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .ri-tag { font-size: 10px; color: #b7a6ff; border: 1px solid rgba(183,166,255,.35);
+        border-radius: 4px; padding: 0 5px; margin-left: auto; flex: none; }
+
+    /* ── 队列面板（右侧浮层）── */
+    #queue-panel { position: fixed; right: 18px; top: 50%; transform: translateY(-50%);
+        width: 300px; max-height: 78vh; z-index: 50;
+        background: var(--panel-bg); border: 1px solid rgba(255,193,7,.35); border-radius: 14px;
+        box-shadow: 0 16px 50px rgba(0,0,0,.65), 0 0 1px rgba(255,255,255,.05) inset;
+        display: flex; flex-direction: column; overflow: hidden;
+        transition: transform .28s cubic-bezier(.2,.9,.3,1), opacity .28s; }
+    #queue-panel.hidden { transform: translateY(-50%) translateX(340px); opacity: 0; pointer-events: none; }
+    .qp-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px;
+        border-bottom: 1px solid rgba(255,255,255,.1); }
+    .qp-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; }
+    .qp-badge { min-width: 20px; height: 20px; border-radius: 10px; background: var(--accent);
+        color: #241a02; font-size: 12px; font-weight: 700; display: flex; align-items: center;
+        justify-content: center; padding: 0 6px; }
+    .qp-badge.zero { background: #4a4a50; color: #bbb; }
+    .qp-close { margin-left: auto; background: none; border: none; color: var(--text-dim);
+        font-size: 18px; cursor: pointer; line-height: 1; padding: 2px 6px; border-radius: 5px; }
+    .qp-close:hover { color: #fff; background: rgba(255,255,255,.08); }
+
+    .qp-stamina { padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.08); }
+    .qp-stamina .lbl { display: flex; justify-content: space-between; font-size: 11px;
+        color: var(--text-dim); margin-bottom: 4px; }
+    .qp-stamina .lbl .val { color: var(--text-color); }
+    .qp-stamina.low .lbl .val { color: var(--danger); }
+    .st-bar { height: 5px; border-radius: 3px; background: rgba(0,0,0,.5); overflow: hidden; }
+    .st-bar i { display: block; height: 100%; border-radius: 3px;
+        background: linear-gradient(90deg, #4d8f4d, #6fbf73); transition: width .3s; }
+    .qp-stamina.low .st-bar i { background: linear-gradient(90deg, #8f3b3b, #e05d5d); }
+
+    .qp-pause { display: none; align-items: center; gap: 8px; margin: 8px 14px 0; padding: 7px 10px;
+        border: 1px solid rgba(224,93,93,.45); background: rgba(224,93,93,.1); border-radius: 8px;
+        font-size: 12px; color: #f0a0a0; }
+    .qp-pause.show { display: flex; }
+    .qp-pause svg { flex: none; }
+
+    .qp-list { flex: 1; overflow-y: auto; padding: 8px 10px 12px; display: flex;
+        flex-direction: column; gap: 7px; }
+    .qp-list::-webkit-scrollbar { width: 4px; }
+    .qp-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+    .qp-empty { color: var(--text-dim); font-size: 12px; text-align: center; padding: 28px 0; line-height: 1.8; }
+
+    .q-task { position: relative; background: var(--slot-bg); border: 1px solid var(--slot-border);
+        border-radius: 9px; padding: 8px 10px 8px 12px; animation: taskIn .25s ease-out; }
+    @keyframes taskIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+    .q-task.blocked { border-color: rgba(224,93,93,.55); background: rgba(224,93,93,.06); }
+    .q-task.done-flash { border-color: rgba(111,191,115,.6); background: rgba(111,191,115,.08); }
+    .qt-top { display: flex; align-items: center; gap: 8px; }
+    .qt-icon { font-size: 17px; flex: none; }
+    .qt-name { font-size: 13px; font-weight: 600; }
+    .qt-cnt { font-size: 11px; color: var(--text-dim); }
+    .qt-cancel { margin-left: auto; background: none; border: none; color: var(--text-dim);
+        cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 4px; flex: none; }
+    .qt-cancel:hover { color: var(--danger); background: rgba(224,93,93,.12); }
+    .qt-status { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 11px; }
+    .qt-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-dim); }
+    .q-task.making .qt-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1s infinite; }
+    .q-task.blocked .qt-dot { background: var(--danger); }
+    @keyframes pulse { 50% { opacity: .35; } }
+    .qt-status .st { color: var(--text-dim); }
+    .q-task.making .qt-status .st { color: var(--accent); }
+    .q-task.blocked .qt-status .st { color: #f0a0a0; }
+    .qt-bar { height: 4px; border-radius: 2px; background: rgba(0,0,0,.5); margin-top: 6px;
+        overflow: hidden; display: none; }
+    .q-task.making .qt-bar { display: block; }
+    .qt-bar i { display: block; height: 100%; background: linear-gradient(90deg, #b8830a, #FFC107);
+        border-radius: 2px; }
+    .qt-note { font-size: 11px; margin-top: 4px; color: #b7a6ff; display: none; }
+    .q-task .qt-note.show { display: block; }
+    .q-task.blocked .qt-note.blocknote { display: block; color: #f0a0a0; }
+
+    /* 抽屉占用条 */
+    .qp-drawer { padding: 9px 14px 12px; border-top: 1px solid rgba(255,255,255,.08); font-size: 11px; }
+    .qp-drawer .lbl { display: flex; justify-content: space-between; color: var(--text-dim); margin-bottom: 4px; }
+    .qp-drawer .lbl .val { color: var(--text-color); }
+    .dr-bar { height: 5px; border-radius: 3px; background: rgba(0,0,0,.5); overflow: hidden; }
+    .dr-bar i { display: block; height: 100%; background: linear-gradient(90deg, #b8830a, #FFC107); transition: width .3s; }
+    .dr-bar.full i { background: linear-gradient(90deg, #8f3b3b, #e05d5d); }
+
+    /* 队列入口（craft-controls 上的徽章，收起面板后仍可见） */
+    #queue-toggle { position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 49;
+        display: none; align-items: center; gap: 8px; padding: 10px 14px;
+        background: var(--panel-bg); border: 1px solid rgba(255,193,7,.4); border-radius: 10px;
+        color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+        box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+    #queue-toggle.show { display: flex; }
+    #queue-toggle:hover { border-color: var(--accent); box-shadow: 0 8px 24px rgba(0,0,0,.5), 0 0 14px var(--accent-glow); }
+    #queue-toggle .qp-badge { background: rgba(255,193,7,.15); color: var(--accent); }
+
+    /* toast */
+    #toast-wrap { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+        display: flex; flex-direction: column; gap: 8px; z-index: 90; align-items: center; }
+    .toast { padding: 9px 20px; border-radius: 9px; font-size: 13px; letter-spacing: .5px;
+        background: rgba(24,24,27,.96); border: 1px solid rgba(255,255,255,.16);
+        box-shadow: 0 8px 26px rgba(0,0,0,.55); animation: toastIn .22s ease-out; }
+    .toast.warn { border-color: rgba(224,93,93,.55); color: #f0b9b9; }
+    .toast.good { border-color: rgba(111,191,115,.55); color: #b9e6bb; }
+    .toast.fade { opacity: 0; transition: opacity .4s; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    /* 前台制作遮罩（官方制作中，仅演示拦截至发生在此前） */
+    #crafting-overlay { position: absolute; inset: 0; border-radius: inherit; z-index: 10;
+        background: rgba(10,8,4,.72); display: none; align-items: center; justify-content: center; }
+    #crafting-overlay.show { display: flex; }
+    .crafting-box { width: 76%; text-align: center; }
+    .crafting-title { font-size: 15px; letter-spacing: 2px; margin: 8px 0 12px; }
+    .crafting-bar-container { height: 10px; border-radius: 5px; background: rgba(0,0,0,.6);
+        border: 1px solid rgba(255,255,255,.14); overflow: hidden; }
+    .crafting-bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, #b8830a, #FFC107); }
+</style>
+</head>
+<body>
+
+<div class="proto-banner">
+    <span><b>CraftQueue 原型</b>（演示用，非产品代码）</span>
+    <span>入队即锁料 → 串行制作 → 成品自动入抽屉</span>
+    <button class="sim-btn" id="sim-stamina">模拟：耗尽精力</button>
+    <button class="sim-btn" id="sim-steal">模拟：拿走预占材料</button>
+    <button class="sim-btn" id="sim-restock">模拟：补充材料</button>
+    <button class="sim-btn" id="sim-falldown">模拟：抽屉压到快满</button>
+</div>
+
+<div class="ui-container">
+    <!-- 左：背包（料仓模拟） -->
+    <div class="panel" id="bag-panel">
+        <h2>背包 · 材料</h2>
+        <div class="hint-text">入队即扣料锁进抽屉</div>
+        <div class="bag-list" id="bag-list"></div>
+    </div>
+
+    <!-- 中：工作台 -->
+    <div class="panel" id="bench-panel">
+        <div class="inner">
+            <h2>工作台</h2>
+            <div class="hint-text">&gt;&gt; 从制造笔记选取配方</div>
+            <div class="product-preview" id="product-preview">
+                <div class="pp-slot" id="pp-slot"></div>
+                <div>
+                    <div class="pp-name" id="pp-name"></div>
+                    <div class="pp-mats" id="pp-mats"></div>
+                </div>
+            </div>
+            <div class="qty-row">
+                <div class="qty-step">
+                    <button id="qty-minus">−</button>
+                    <input id="qty-input" type="text" inputmode="numeric" value="1">
+                    <button id="qty-plus">+</button>
+                </div>
+                <span style="font-size:11px;color:var(--text-dim)">件</span>
+            </div>
+            <div class="craft-controls">
+                <button class="btn" id="btn-clear">清空</button>
+                <button class="btn" id="btn-craft">制造</button>
+                <button class="btn" id="btn-enqueue">加入队列</button>
+            </div>
+            <div id="crafting-overlay">
+                <div class="crafting-box">
+                    <div class="crafting-title">正在打造...</div>
+                    <div class="crafting-bar-container"><div class="crafting-bar-fill" id="craft-progress"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右：制造笔记 -->
+    <div class="panel" id="notes-panel">
+        <h2>制造笔记</h2>
+        <div class="recipe-list" id="recipe-list"></div>
+    </div>
+</div>
+
+<!-- 队列入口（面板收起时） -->
+<button id="queue-toggle">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    制作队列 <span class="qp-badge" id="tg-badge">0</span>
+</button>
+
+<!-- 队列面板 -->
+<div id="queue-panel" class="hidden">
+    <div class="qp-head">
+        <span class="qp-title">制作队列</span>
+        <span class="qp-badge zero" id="qp-badge">0</span>
+        <button class="qp-close" id="qp-close" title="收起（队列继续后台执行）">×</button>
+    </div>
+    <div class="qp-stamina" id="qp-stamina">
+        <div class="lbl"><span>精力</span><span class="val" id="st-val">100 / 100</span></div>
+        <div class="st-bar"><i id="st-fill" style="width:100%"></i></div>
+    </div>
+    <div class="qp-pause" id="qp-pause">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="#f0a0a0"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        <span id="qp-pause-text">精力不足，队列已暂停——恢复后自动继续</span>
+    </div>
+    <div class="qp-list" id="qp-list">
+        <div class="qp-empty" id="qp-empty">队列为空<br>选配方点「加入队列」，可随时关闭界面</div>
+    </div>
+    <div class="qp-drawer">
+        <div class="lbl"><span>工作台抽屉</span><span class="val" id="dr-val">3 / 120 格</span></div>
+        <div class="dr-bar" id="dr-bar"><i id="dr-fill" style="width:2.5%"></i></div>
+    </div>
+</div>
+
+<div id="toast-wrap"></div>
+
+<script>
+'use strict';
+/* ───────── 假数据 ───────── */
+const RECIPES = [
+    { key: 'plank',   name: '木板',   icon: '🪵', time: 2.2, mats: { 木材: 2 },            out: 1 },
+    { key: 'nail',    name: '铁钉',   icon: '🔩', time: 1.6, mats: { 铁块: 1, 木材: 1 },    out: 2 },
+    { key: 'cloth',   name: '布条',   icon: '🧵', time: 1.2, mats: { 旧衣服: 1 },           out: 3 },
+    { key: 'bandage', name: '绷带',   icon: '🩹', time: 2.8, mats: { 布条: 2, 酒精: 1 },    out: 1 },
+    { key: 'cabinet', name: '储物柜', icon: '🗄️', time: 4.0, mats: { 木板: 6, 铁钉: 8 },    out: 1, furniture: true },
+];
+const ST = {
+    bag: { 木材: 26, 铁块: 14, 旧衣服: 6, 布条: 5, 酒精: 4 },
+    drawerUsed: 3, drawerCap: 120,
+    stamina: 100, staminaMax: 100,
+    tasks: [], nextId: 1, selKey: null, qty: 1,
+    staminaPaused: false,
+};
+const $ = id => document.getElementById(id);
+
+/* ───────── 渲染：背包 ───────── */
+function renderBag() {
+    $('bag-list').innerHTML = Object.entries(ST.bag).map(([k, v]) =>
+        `<div class="bag-row"><span>${k}</span><span class="cnt">${v}</span></div>`).join('');
+}
+/* ───────── 渲染：配方 ───────── */
+function renderRecipes() {
+    $('recipe-list').innerHTML = RECIPES.map(r =>
+        `<div class="recipe-item ${ST.selKey === r.key ? 'sel' : ''}" data-k="${r.key}">
+            <div class="ri-icon">${r.icon}</div>
+            <div><div class="ri-name">${r.name}</div>
+            <div class="ri-mats">${Object.entries(r.mats).map(([m, n]) => `${m}×${n}`).join('　')}</div></div>
+            ${r.furniture ? '<span class="ri-tag">家具</span>' : ''}
+        </div>`).join('');
+    document.querySelectorAll('.recipe-item').forEach(el =>
+        el.onclick = () => { ST.selKey = el.dataset.k; renderRecipes(); renderPreview(); });
+}
+function renderPreview() {
+    const r = RECIPES.find(x => x.key === ST.selKey);
+    const pv = $('product-preview');
+    if (!r) { pv.classList.remove('show'); $('btn-enqueue').disabled = true; return; }
+    $('btn-enqueue').disabled = false;
+    $('pp-slot').textContent = r.icon;
+    $('pp-name').textContent = r.name;
+    $('pp-mats').innerHTML = Object.entries(r.mats).map(([m, n]) => {
+        const have = availOf(m);
+        return `<span class="${have < n ? 'short' : ''}">${m} ${have}/${n}</span>`;
+    }).join('　');
+    pv.classList.add('show');
+}
+const availOf = m => ST.bag[m] || 0;
+
+/* ───────── 队列操作 ───────── */
+function enqueue() {
+    const r = RECIPES.find(x => x.key === ST.selKey);
+    if (!r) return;
+    const qty = ST.qty;
+    // 只校验第 1 件的料（逐件取料口径）；料从背包扣，锁进抽屉
+    const lack = Object.entries(r.mats).filter(([m, n]) => availOf(m) < n);
+    if (lack.length) { toast(`材料不足：${lack.map(([m]) => m).join('、')}`, 'warn'); return; }
+    if (ST.drawerUsed + Object.keys(r.mats).length > ST.drawerCap) { toast('工作台抽屉已满，无法预占材料', 'warn'); return; }
+    Object.entries(r.mats).forEach(([m, n]) => { ST.bag[m] -= n; ST.drawerUsed += 1; });
+    ST.tasks.push({ id: ST.nextId++, r, left: qty, total: qty, status: 'queued', prog: 0 });
+    renderBag(); renderDrawer(); renderQueue(); renderPreview();
+    toast(`已入队：${r.name} ×${qty}（材料已锁进抽屉）`, 'good');
+}
+function cancel(id) {
+    const i = ST.tasks.findIndex(t => t.id === id);
+    if (i < 0) return;
+    const t = ST.tasks[i];
+    if (t.status === 'making') { // 制作中取消：料已在消耗链上，官方不毁料 → 停止制作
+        toast(`已取消：${t.r.name}（本件中止，剩余材料留在抽屉）`);
+    } else {
+        ST.drawerUsed -= Object.keys(t.r.mats).length; // 预占释放，料留在抽屉（简化：不计背包）
+        toast(`已取消：${t.r.name}（材料留在抽屉可复用）`);
+    }
+    ST.tasks.splice(i, 1);
+    renderQueue(); renderDrawer();
+}
+
+/* ───────── runner：串行状态机（模拟 ToolTableManager 节奏）───────── */
+setInterval(() => {
+    // 精力自然恢复
+    if (ST.stamina < ST.staminaMax) {
+        ST.stamina = Math.min(ST.staminaMax, ST.stamina + 0.6);
+        if (ST.staminaPaused && ST.stamina >= 8) {
+            ST.staminaPaused = false;
+            toast('精力恢复，队列继续', 'good');
+        }
+    }
+    // 派发：队首 queued + 非挂起；blocked 任务补料够后自动回队（产品语义同）
+    if (!ST.staminaPaused) {
+        const t = ST.tasks.find(x => x.status === 'queued');
+        if (t) {
+            if (t.stolen || t.stealNext) { t.status = 'blocked'; t.blockNote = '预占材料被取走'; t.blockedAt = Date.now(); t.stealNext = false; }
+            else if (ST.stamina < 8) { ST.staminaPaused = true; }
+            else { t.status = 'making'; t.prog = 0; ST.stamina -= 8; }
+        }
+        const bl = ST.tasks.find(x => x.status === 'blocked');
+        if (bl && Date.now() - (bl.blockedAt || 0) > 1500) {   // 最短挂起展示 1.5s，避免红条一闪而过
+            const lack = Object.entries(bl.r.mats).filter(([m, n]) => availOf(m) < n);
+            if (!lack.length) {
+                Object.entries(bl.r.mats).forEach(([m, n]) => { ST.bag[m] -= n; });
+                bl.status = 'queued'; bl.stolen = false; bl.stealNext = false; bl.blockNote = null;
+                renderBag(); toast(`缺料已补：${bl.r.name} 恢复排队`, 'good');
+            }
+        }
+    }
+    // 制作推进
+    const mk = ST.tasks.find(x => x.status === 'making');
+    if (mk) {
+        mk.prog += 100 / (mk.r.time * 20);
+        if (mk.prog >= 100) finish(mk);
+    }
+    renderStamina(); renderQueue();
+}, 50);
+
+function finish(t) {
+    t.left -= 1;
+    if (t.r.furniture) {
+        toast(`${t.r.name} 已完成——家具包裹已送玄关`, 'good');
+    } else if (ST.drawerUsed + t.r.out >= ST.drawerCap) {
+        ST.drawerUsed = ST.drawerCap;
+        toast(`抽屉已满：${t.r.name} 掉落在工作台旁地面`, 'warn');
+    } else {
+        ST.drawerUsed += t.r.out;
+        toast(`${t.r.name} 已放入工作台抽屉`, 'good');
+    }
+    if (t.left <= 0) {
+        t.status = 'done';
+        setTimeout(() => {
+            const i = ST.tasks.indexOf(t);
+            if (i >= 0) ST.tasks.splice(i, 1);
+            renderQueue();
+        }, 900);
+    } else {
+        // 下一件取料：料不够/被偷则标红挂起（补料后由 runner 自动恢复）
+        const lack = Object.entries(t.r.mats).filter(([m, n]) => availOf(m) < n);
+        if (lack.length || t.stealNext) {
+            t.status = 'blocked';
+            t.blockNote = t.stealNext ? '预占材料被取走' : `材料不足：${lack.map(([m]) => m).join('、')}`;
+            t.blockedAt = Date.now();
+            t.stealNext = false;
+        }
+        else { Object.entries(t.r.mats).forEach(([m, n]) => { ST.bag[m] -= n; }); t.status = 'queued'; renderBag(); renderPreview(); }
+    }
+    renderDrawer();
+}
+
+/* ───────── 渲染：队列 ───────── */
+function renderQueue() {
+    const n = ST.tasks.length;
+    $('qp-badge').textContent = n; $('qp-badge').classList.toggle('zero', n === 0);
+    $('tg-badge').textContent = n;
+    $('qp-pause').classList.toggle('show', ST.staminaPaused);
+    if (!n) {
+        $('qp-list').innerHTML = '<div class="qp-empty">队列为空<br>选配方点「加入队列」，可随时关闭界面</div>';
+        document.querySelectorAll('.qt-cancel').forEach(b => b.onclick = () => cancel(+b.dataset.id));
+        return;
+    }
+    $('qp-list').innerHTML = ST.tasks.map(t => {
+        const cls = t.status === 'making' ? 'making' : t.status === 'blocked' ? 'blocked' : t.status === 'done' ? 'done-flash' : '';
+        const stTxt = { queued: '排队中', making: `制作中 ${Math.min(100, t.prog) | 0}%`, blocked: '已挂起', done: '完成' }[t.status];
+        const note = t.r.furniture ? '<div class="qt-note">家具成品将送玄关</div>' : '';
+        const block = t.blockNote ? `<div class="qt-note blocknote">${t.blockNote}——补料后自动继续</div>` : '';
+        return `<div class="q-task ${cls}">
+            <div class="qt-top">
+                <span class="qt-icon">${t.r.icon}</span>
+                <span class="qt-name">${t.r.name}</span>
+                <span class="qt-cnt">${t.total - t.left + (t.status === 'done' ? 0 : 1)} / ${t.total}</span>
+                <button class="qt-cancel" data-id="${t.id}" title="取消（材料留在抽屉）">×</button>
+            </div>
+            <div class="qt-status"><span class="qt-dot"></span><span class="st">${stTxt}</span></div>
+            <div class="qt-bar"><i style="width:${Math.min(100, t.prog)}%"></i></div>
+            ${note}${block}
+        </div>`;
+    }).join('');
+    document.querySelectorAll('.qt-cancel').forEach(b => b.onclick = () => cancel(+b.dataset.id));
+}
+function renderStamina() {
+    const low = ST.stamina < 8;
+    $('st-val').textContent = `${ST.stamina | 0} / ${ST.staminaMax}`;
+    $('st-fill').style.width = (ST.stamina / ST.staminaMax * 100) + '%';
+    $('qp-stamina').classList.toggle('low', low);
+}
+function renderDrawer() {
+    $('dr-val').textContent = `${ST.drawerUsed} / ${ST.drawerCap} 格`;
+    $('dr-fill').style.width = (ST.drawerUsed / ST.drawerCap * 100) + '%';
+    $('dr-bar').classList.toggle('full', ST.drawerUsed >= ST.drawerCap - 4);
+}
+
+/* ───────── 前台「制造」按钮：E 方案拦截演示 ───────── */
+$('btn-craft').onclick = () => {
+    const r = RECIPES.find(x => x.key === ST.selKey);
+    if (!r) { toast('请先在制造笔记选择配方', 'warn'); return; }
+    // 拦截判定：刨除队列预占后（此处=背包余量，因入队即扣），够不够本次
+    const lack = Object.entries(r.mats).filter(([m, n]) => availOf(m) < n);
+    if (lack.length) {
+        toast(`材料已被队列任务占用（缺 ${lack.map(([m]) => m).join('、')}）——请补充材料或取消队列任务`, 'warn');
+        return;
+    }
+    const ov = $('crafting-overlay'); ov.classList.add('show');
+    const fill = $('craft-progress'); let p = 0;
+    const iv = setInterval(() => {
+        p += 4; fill.style.width = p + '%';
+        if (p >= 100) { clearInterval(iv); ov.classList.remove('show'); fill.style.width = '0%';
+            Object.entries(r.mats).forEach(([m, n]) => ST.bag[m] -= n);
+            renderBag(); renderPreview(); toast(`前台制作完成：${r.name}（收下进背包）`, 'good'); }
+    }, 30);
+};
+
+/* ───────── 面板开合 / 数量 / 模拟按钮 ───────── */
+$('btn-enqueue').onclick = enqueue;
+$('qp-close').onclick = () => { $('queue-panel').classList.add('hidden'); $('queue-toggle').classList.add('show'); };
+$('queue-toggle').onclick = () => { $('queue-panel').classList.remove('hidden'); $('queue-toggle').classList.remove('show'); };
+const clampQty = v => Math.max(1, Math.min(99, v | 0 || 1));
+$('qty-minus').onclick = () => { ST.qty = clampQty(ST.qty - 1); $('qty-input').value = ST.qty; };
+$('qty-plus').onclick = () => { ST.qty = clampQty(ST.qty + 1); $('qty-input').value = ST.qty; };
+$('qty-input').onblur = () => { ST.qty = clampQty(+$('qty-input').value); $('qty-input').value = ST.qty; };
+$('btn-clear').onclick = () => { ST.selKey = null; renderRecipes(); renderPreview(); };
+$('sim-stamina').onclick = () => { ST.stamina = 0; ST.staminaPaused = true; toast('模拟：精力耗尽，队列挂起'); };
+$('sim-steal').onclick = () => {
+    const t = ST.tasks.find(x => x.status === 'queued' || x.status === 'making');
+    if (!t) { toast('先入队一个任务再模拟', 'warn'); return; }
+    t.stealNext = true;
+    toast('模拟：预占材料被手动拿走——下一件开工时该任务将标红挂起');
+};
+$('sim-restock').onclick = () => {
+    Object.keys(ST.bag).forEach(m => ST.bag[m] += 10);
+    renderBag(); renderPreview(); toast('模拟：材料已补充（背包）——挂起任务将自动恢复');
+};
+$('sim-falldown').onclick = () => { ST.drawerUsed = ST.drawerCap - 2; renderDrawer(); toast('模拟：抽屉接近满——下一件成品将掉落地面'); };
+
+/* ───────── toast ───────── */
+function toast(msg, kind = '') {
+    const el = document.createElement('div');
+    el.className = 'toast ' + kind; el.textContent = msg;
+    $('toast-wrap').appendChild(el);
+    setTimeout(() => el.classList.add('fade'), 2600);
+    setTimeout(() => el.remove(), 3100);
+}
+
+/* ───────── 初始化：预置两条任务，直接看效果 ───────── */
+renderBag(); renderRecipes(); renderDrawer(); renderStamina();
+ST.selKey = 'plank'; renderRecipes(); renderPreview();
+enqueue();
+ST.selKey = 'cabinet'; ST.qty = 2; $('qty-input').value = 2; renderRecipes(); renderPreview();
+enqueue();
+ST.qty = 1; $('qty-input').value = 1;
+$('queue-panel').classList.remove('hidden');
+</script>
+</body>
+</html>
