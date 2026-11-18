@@ -188,7 +188,8 @@
     .qp-empty { color: var(--text-dim); font-size: 12px; text-align: center; padding: 28px 0; line-height: 1.8; }
 
     .q-task { position: relative; background: var(--slot-bg); border: 1px solid var(--slot-border);
-        border-radius: 9px; padding: 8px 10px 8px 12px; animation: taskIn .25s ease-out; }
+        border-radius: 9px; padding: 8px 10px 8px 12px; }
+    .q-task.enter { animation: taskIn .25s ease-out; }
     @keyframes taskIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
     .q-task.blocked { border-color: rgba(224,93,93,.55); background: rgba(224,93,93,.06); }
     .q-task.done-flash { border-color: rgba(111,191,115,.6); background: rgba(111,191,115,.08); }
@@ -224,15 +225,22 @@
     .dr-bar i { display: block; height: 100%; background: linear-gradient(90deg, #b8830a, #FFC107); transition: width .3s; }
     .dr-bar.full i { background: linear-gradient(90deg, #8f3b3b, #e05d5d); }
 
-    /* 队列入口（craft-controls 上的徽章，收起面板后仍可见） */
-    #queue-toggle { position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 49;
-        display: none; align-items: center; gap: 8px; padding: 10px 14px;
-        background: var(--panel-bg); border: 1px solid rgba(255,193,7,.4); border-radius: 10px;
-        color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
-        box-shadow: 0 8px 24px rgba(0,0,0,.5); }
-    #queue-toggle.show { display: flex; }
-    #queue-toggle:hover { border-color: var(--accent); box-shadow: 0 8px 24px rgba(0,0,0,.5), 0 0 14px var(--accent-glow); }
-    #queue-toggle .qp-badge { background: rgba(255,193,7,.15); color: var(--accent); }
+    /* 工作台标题行 + 队列入口胶囊 */
+    .bench-head { width: 100%; display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .bench-head h2 { width: auto; margin: 0; }
+    #head-queue-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 11px;
+        background: var(--btn-bg); border: 1px solid rgba(255,193,7,.42); border-radius: 13px;
+        color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: .5px;
+        cursor: pointer; font-family: inherit; transition: all .2s; }
+    #head-queue-btn:hover { background: rgba(255,193,7,.12); border-color: var(--accent);
+        box-shadow: 0 0 10px var(--accent-glow); }
+    .hqb-badge { min-width: 16px; height: 16px; border-radius: 8px; padding: 0 4px;
+        background: var(--accent); color: #241a02; font-size: 11px; font-weight: 700;
+        display: inline-flex; align-items: center; justify-content: center; }
+    .hqb-badge.zero { background: rgba(255,193,7,.15); color: var(--accent); }
+
+    /* 按钮行 3 键微缩（面板 372px 宽度约束） */
+    .btn-slim { padding: 8px 15px; font-size: 12.5px; }
 
     /* toast */
     #toast-wrap { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
@@ -278,7 +286,13 @@
     <!-- 中：工作台 -->
     <div class="panel" id="bench-panel">
         <div class="inner">
-            <h2>工作台</h2>
+            <div class="bench-head">
+                <h2>工作台</h2>
+                <button id="head-queue-btn" title="查看制作队列">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+                    队列 <span class="hqb-badge zero" id="head-queue-badge">0</span>
+                </button>
+            </div>
             <div class="hint-text">&gt;&gt; 从制造笔记选取配方</div>
             <div class="product-preview" id="product-preview">
                 <div class="pp-slot" id="pp-slot"></div>
@@ -296,9 +310,9 @@
                 <span style="font-size:11px;color:var(--text-dim)">件</span>
             </div>
             <div class="craft-controls">
-                <button class="btn" id="btn-clear">清空</button>
+                <button class="btn btn-slim" id="btn-clear">清空</button>
                 <button class="btn" id="btn-craft">制造</button>
-                <button class="btn" id="btn-enqueue">加入队列</button>
+                <button class="btn btn-slim" id="btn-enqueue">加入队列</button>
             </div>
             <div id="crafting-overlay">
                 <div class="crafting-box">
@@ -316,12 +330,6 @@
     </div>
 </div>
 
-<!-- 队列入口（面板收起时） -->
-<button id="queue-toggle">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-    制作队列 <span class="qp-badge" id="tg-badge">0</span>
-</button>
-
 <!-- 队列面板 -->
 <div id="queue-panel" class="hidden">
     <div class="qp-head">
@@ -329,8 +337,8 @@
         <span class="qp-badge zero" id="qp-badge">0</span>
         <button class="qp-close" id="qp-close" title="收起（队列继续后台执行）">×</button>
     </div>
-    <div class="qp-stamina" id="qp-stamina">
-        <div class="lbl"><span>精力</span><span class="val" id="st-val">100 / 100</span></div>
+    <div class="qp-stamina" id="qp-stamina" title="制作每件消耗精力；不足时整队自动暂停，恢复后继续">
+        <div class="lbl"><span>精力 · 制作消耗</span><span class="val" id="st-val">100 / 100</span></div>
         <div class="st-bar"><i id="st-fill" style="width:100%"></i></div>
     </div>
     <div class="qp-pause" id="qp-pause">
@@ -359,7 +367,7 @@ const RECIPES = [
     { key: 'cabinet', name: '储物柜', icon: '🗄️', time: 4.0, mats: { 木板: 6, 铁钉: 8 },    out: 1, furniture: true },
 ];
 const ST = {
-    bag: { 木材: 26, 铁块: 14, 旧衣服: 6, 布条: 5, 酒精: 4 },
+    bag: { 木材: 26, 铁块: 14, 旧衣服: 6, 布条: 5, 酒精: 4, 木板: 12, 铁钉: 16 },
     drawerUsed: 3, drawerCap: 120,
     stamina: 100, staminaMax: 100,
     tasks: [], nextId: 1, selKey: null, qty: 1,
@@ -496,39 +504,53 @@ function finish(t) {
     renderDrawer();
 }
 
-/* ───────── 渲染：队列 ───────── */
-function renderQueue() {
+/* ───────── 渲染：队列（签名 diff——结构不变只轻量更新进度，防全量重绘闪屏）───────── */
+const _qSeen = new Set();
+let _qSig = '';
+const stTxtOf = t => ({ queued: '排队中', making: `制作中 ${Math.min(100, t.prog) | 0}%`, blocked: '已挂起', done: '完成' }[t.status]);
+function renderQueue(force) {
     const n = ST.tasks.length;
     $('qp-badge').textContent = n; $('qp-badge').classList.toggle('zero', n === 0);
-    $('tg-badge').textContent = n;
+    $('head-queue-badge').textContent = n; $('head-queue-badge').classList.toggle('zero', n === 0);
     $('qp-pause').classList.toggle('show', ST.staminaPaused);
     if (!n) {
-        $('qp-list').innerHTML = '<div class="qp-empty">队列为空<br>选配方点「加入队列」，可随时关闭界面</div>';
-        document.querySelectorAll('.qt-cancel').forEach(b => b.onclick = () => cancel(+b.dataset.id));
+        if (_qSig !== 'empty') { _qSig = 'empty'; _qSeen.clear(); $('qp-list').innerHTML = '<div class="qp-empty">队列为空<br>选配方点「加入队列」，可随时关闭界面</div>'; }
         return;
     }
-    $('qp-list').innerHTML = ST.tasks.map(t => {
-        const cls = t.status === 'making' ? 'making' : t.status === 'blocked' ? 'blocked' : t.status === 'done' ? 'done-flash' : '';
-        const stTxt = { queued: '排队中', making: `制作中 ${Math.min(100, t.prog) | 0}%`, blocked: '已挂起', done: '完成' }[t.status];
-        const note = t.r.furniture ? '<div class="qt-note">家具成品将送玄关</div>' : '';
-        const block = t.blockNote ? `<div class="qt-note blocknote">${t.blockNote}——补料后自动继续</div>` : '';
-        return `<div class="q-task ${cls}">
-            <div class="qt-top">
-                <span class="qt-icon">${t.r.icon}</span>
-                <span class="qt-name">${t.r.name}</span>
-                <span class="qt-cnt">${t.total - t.left + (t.status === 'done' ? 0 : 1)} / ${t.total}</span>
-                <button class="qt-cancel" data-id="${t.id}" title="取消（材料留在抽屉）">×</button>
-            </div>
-            <div class="qt-status"><span class="qt-dot"></span><span class="st">${stTxt}</span></div>
-            <div class="qt-bar"><i style="width:${Math.min(100, t.prog)}%"></i></div>
-            ${note}${block}
-        </div>`;
-    }).join('');
-    document.querySelectorAll('.qt-cancel').forEach(b => b.onclick = () => cancel(+b.dataset.id));
+    const sig = ST.tasks.map(t => t.id + ':' + t.status + ':' + t.left).join('|');
+    if (force || sig !== _qSig) {
+        _qSig = sig;
+        $('qp-list').innerHTML = ST.tasks.map(t => {
+            const cls = t.status === 'making' ? 'making' : t.status === 'blocked' ? 'blocked' : t.status === 'done' ? 'done-flash' : '';
+            const enter = _qSeen.has(t.id) ? '' : ' enter'; _qSeen.add(t.id);
+            const note = t.r.furniture ? '<div class="qt-note">家具成品将送玄关</div>' : '';
+            const block = t.blockNote ? `<div class="qt-note blocknote">${t.blockNote}——补料后自动继续</div>` : '';
+            return `<div class="q-task${enter} ${cls}" data-id="${t.id}">
+                <div class="qt-top">
+                    <span class="qt-icon">${t.r.icon}</span>
+                    <span class="qt-name">${t.r.name}</span>
+                    <span class="qt-cnt">${t.total - t.left + (t.status === 'done' ? 0 : 1)} / ${t.total}</span>
+                    <button class="qt-cancel" data-id="${t.id}" title="取消（材料留在抽屉）">×</button>
+                </div>
+                <div class="qt-status"><span class="qt-dot"></span><span class="st">${stTxtOf(t)}</span></div>
+                <div class="qt-bar"><i style="width:${Math.min(100, t.prog)}%"></i></div>
+                ${note}${block}
+            </div>`;
+        }).join('');
+        document.querySelectorAll('.qt-cancel').forEach(b => b.onclick = () => cancel(+b.dataset.id));
+    } else {
+        ST.tasks.forEach(t => {
+            const el = document.querySelector(`.q-task[data-id="${t.id}"]`);
+            if (!el) return;
+            el.querySelector('.st').textContent = stTxtOf(t);
+            const bar = el.querySelector('.qt-bar i');
+            if (bar) bar.style.width = Math.min(100, t.prog) + '%';
+        });
+    }
 }
 function renderStamina() {
     const low = ST.stamina < 8;
-    $('st-val').textContent = `${ST.stamina | 0} / ${ST.staminaMax}`;
+    $('st-val').textContent = `${ST.stamina | 0} / ${ST.staminaMax}（还能做 ${ST.stamina / 8 | 0} 件）`;
     $('st-fill').style.width = (ST.stamina / ST.staminaMax * 100) + '%';
     $('qp-stamina').classList.toggle('low', low);
 }
@@ -560,8 +582,8 @@ $('btn-craft').onclick = () => {
 
 /* ───────── 面板开合 / 数量 / 模拟按钮 ───────── */
 $('btn-enqueue').onclick = enqueue;
-$('qp-close').onclick = () => { $('queue-panel').classList.add('hidden'); $('queue-toggle').classList.add('show'); };
-$('queue-toggle').onclick = () => { $('queue-panel').classList.remove('hidden'); $('queue-toggle').classList.remove('show'); };
+$('qp-close').onclick = () => $('queue-panel').classList.add('hidden');
+$('head-queue-btn').onclick = () => $('queue-panel').classList.toggle('hidden');
 const clampQty = v => Math.max(1, Math.min(99, v | 0 || 1));
 $('qty-minus').onclick = () => { ST.qty = clampQty(ST.qty - 1); $('qty-input').value = ST.qty; };
 $('qty-plus').onclick = () => { ST.qty = clampQty(ST.qty + 1); $('qty-input').value = ST.qty; };
