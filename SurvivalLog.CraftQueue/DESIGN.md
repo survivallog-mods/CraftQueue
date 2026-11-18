@@ -36,6 +36,20 @@
   status ∈ queued/making/blocked/done（Dispatched→making）。手写拼接零依赖，中文原样、引号反斜杠转义。
 - 单测：`tests/QueueStateTests`（零依赖 console，`dotnet run`，非零退出码=失败）。
 | MaterialPicker.cs | 官方口径取料选择器（预占排除/变体拒绝/搬抽屉） |
+
+### MaterialPicker 细节
+
+- `PickAndReserve(recipeId, out PickFail)`：需求计数（`MaterialList` 重复出现=数量，表实证）→
+  逐 owner 选料（背包 `ActionDispatcher.GetLeadingRoleAgentId()` → 柜子 → 抽屉剔除预占）→
+  `TryQuickMoveItems(ids, src, drawerOwner, silent)` 搬抽屉（返回数≠选数=半路失败，放弃本轮不预占）。
+- 变体拒绝：`DyeConfig.IsDyeMaterial(configId)` 命中任一材料 → `PickFail.Variant`（v1 口径）。
+- 柜子清单：官方 `AgentManager.GetFurnituresWithBag(mapId,...)` 枚举 + 功能包排除
+  （BagId 1008/1009/1010/2003 与家具 313/80033/80164/1024-1028/42033/66196/330/384/389/9126，
+  CabinetEverywhere 同源实证），5s 缓存。
+- `CountAvailExcludingReserved(configId)`：同口径计数，CraftGate（前台拦截）消费。
+- 取料池**不含台面与页签源**（ledger Ruling：前台备料工作区保护）。
+- interop 要点：`ItemData.InstanceId`（BaseEntity）为物品实例 id（跨包移动不变）；
+  `GetItemDataList`/`TryQuickMoveItems` 收发 Il2CppSystem 列表。
 | QueueRunner.cs | 串行 runner：派发/完成收尾/落地/精力挂起/取消 |
 | CraftGate.cs | 前台制作拦截（Make/CraftAgain 双入口） |
 | QueueUi.cs + queueui.page.js | webui 注入：入队按钮/队列胶囊/队列面板 |
