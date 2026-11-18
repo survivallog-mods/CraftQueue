@@ -69,32 +69,31 @@ internal static class MaterialPicker
     /// 为一件任务选料并预占：选背包→柜子→抽屉(未预占)中该配方的全部材料，搬进抽屉，
     /// 登记进 QueueState.ReservedItemIds（经调用方任务对象）。返回物品 id 列表（空=失败）。
     /// </summary>
-    public static List<long> PickAndReserve(int recipeId, out PickFail fail)
+    public static List<long> PickAndReserve(Il2CppSystem.Collections.Generic.List<int> materialIds, out PickFail fail)
     {
         fail = PickFail.None;
         var result = new List<long>();
         var im = IM();
         var drawerOwner = DrawerOwner();
-        var cfg = CM()?.Get_Config_ProductionList(recipeId);
-        if (cfg == null || cfg.MaterialList == null || cfg.MaterialList.Count == 0)
+        if (materialIds == null || materialIds.Count == 0)
         {
             fail = PickFail.NoRecipe;
             return result;
         }
         // 染料变体：v1 直接拒绝（spec §7.5，材料实例不唯一确定）
-        foreach (var matId in cfg.MaterialList)
+        for (int mi = 0; mi < materialIds.Count; mi++)
         {
             bool isDye = false;
-            try { isDye = DyeConfig.IsDyeMaterial(matId); } catch { }
+            try { isDye = DyeConfig.IsDyeMaterial(materialIds[mi]); } catch { }
             if (isDye) { fail = PickFail.Variant; return result; }
         }
 
-        // 需求计数（MaterialList 重复出现=数量，表实证）
+        // 需求计数（重复出现=数量）
         var need = new Dictionary<int, int>();
-        foreach (var m in cfg.MaterialList)
+        for (int mi = 0; mi < materialIds.Count; mi++)
         {
-            need.TryGetValue(m, out var n);
-            need[m] = n + 1;
+            need.TryGetValue(materialIds[mi], out var n);
+            need[materialIds[mi]] = n + 1;
         }
 
         // 抽屉容量（近似口径：剩余格 ≥ 材料种类数）

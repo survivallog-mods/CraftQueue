@@ -6,11 +6,11 @@
     if (window.__CQ__) return;
 
     var CSS = [
-        '.cq-head-btn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;background:linear-gradient(180deg,rgba(58,58,60,.9),rgba(38,38,40,.92));border:1px solid rgba(255,193,7,.42);border-radius:13px;color:#FFC107;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}',
+        '.cq-head-btn{position:absolute;right:14px;top:16px;z-index:5;display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;background:linear-gradient(180deg,rgba(58,58,60,.9),rgba(38,38,40,.92));border:1px solid rgba(255,193,7,.42);border-radius:13px;color:#FFC107;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}',
         '.cq-head-btn:hover{background:rgba(255,193,7,.12);border-color:#FFC107;box-shadow:0 0 10px rgba(255,193,7,.28)}',
         '.cq-badge{min-width:16px;height:16px;border-radius:8px;padding:0 4px;background:#FFC107;color:#241a02;font-size:11px;font-weight:700;display:inline-flex;align-items:center;justify-content:center}',
         '.cq-badge.zero{background:rgba(255,193,7,.15);color:#FFC107}',
-        '.cq-enqueue{color:#FFC107;border-color:rgba(255,193,7,.5);background:rgba(255,193,7,.06);font-weight:600}',
+        '.cq-enqueue{color:#FFC107;border-color:rgba(255,193,7,.5);background:rgba(255,193,7,.06);font-weight:600;padding:8px 13px;font-size:12.5px;flex:none;white-space:nowrap}',
         '.cq-enqueue:hover{background:rgba(255,193,7,.14);border-color:#FFC107;color:#ffd75e}',
         '.cq-panel{position:fixed;right:14px;top:50%;transform:translateY(-50%);width:290px;max-height:76vh;z-index:60;background:linear-gradient(168deg,rgba(34,34,36,.96),rgba(20,20,22,.97));border:1px solid rgba(255,193,7,.35);border-radius:14px;box-shadow:0 16px 50px rgba(0,0,0,.65);display:none;flex-direction:column;overflow:hidden;font-family:"Microsoft YaHei",sans-serif}',
         '.cq-panel.open{display:flex}',
@@ -43,17 +43,44 @@
     ].join('');
 
     var CQ = {
-        data: null, sig: '', seen: {}, mounted: null, cssDone: false,
+        data: null, sig: '', seen: {}, mounted: null, cssDone: false, cmds: [],
 
+        // C# 每周期调用取走命令队列（返回值经 ExecuteJavaScript 回调回传——CE RailCommands 同款通道）
+        drain: function () {
+            if (!CQ.cmds.length) return '';
+            var out = JSON.stringify(CQ.cmds);
+            CQ.cmds.length = 0;
+            return out;
+        },
+
+        lastKey: '',
         setData: function (jsonStr) {
             try { CQ.data = JSON.parse(jsonStr); } catch (e) { return; }
             var f = findToolTable();
             if (!f) return;                    // 界面未开：缓存，iframe 出现时 render
             mount(f.doc, f.win);
+            hookSend(f.win);                   // iframe core 可能重建，每次都试挂（幂等）
             render(f.doc);
         }
     };
     window.__CQ__ = CQ;
+
+    // 配方选中捕获：包装官方 UnitySendEvent，记录 RECIPE_CLICK 的 recipeKey（页面内可靠，
+    // C# 侧 Harmony prefix 在 native 调用链未触发——实机诊断实证）
+    function hookSend(win) {
+        try {
+            if (!win || !win.core || !win.core.UnitySendEvent || win.core.UnitySendEvent.__cq) return;
+            var orig = win.core.UnitySendEvent;
+            var wrapped = function (type, payload) {
+                try {
+                    if (type === 'RECIPE_CLICK' && payload && payload.recipeKey) CQ.lastKey = payload.recipeKey;
+                } catch (e) { }
+                return orig.call(win.core, type, payload);
+            };
+            wrapped.__cq = 1;
+            win.core.UnitySendEvent = wrapped;
+        } catch (e) { }
+    }
 
     function findToolTable() {
         try {
@@ -74,28 +101,28 @@
         if (!doc.getElementById('cq-style')) {                        // 终审 I10：按元素存在性（iframe 重建后重注）
             var st = doc.createElement('style'); st.id = 'cq-style'; st.textContent = CSS; doc.head.appendChild(st);
         }
-        if (!doc.getElementById('cq-enqueue')) {
+        // 加入队列挂数量行尾（craft-controls 官方已有 清空/制造/能耗标签，第 4 键实测挤压变形）
+        var qtyRow = doc.getElementById('qty-row');
+        if (qtyRow && !doc.getElementById('cq-enqueue')) {
             var btn = doc.createElement('button');
             btn.className = 'btn cq-enqueue'; btn.id = 'cq-enqueue'; btn.textContent = '加入队列';
             btn.addEventListener('click', function () {
                 var qty = 1;
                 try { qty = parseInt(doc.getElementById('qty-input').value, 10) || 1; } catch (e) { }
-                send(win, { qty: qty, cqEnqueue: 1 });
+                CQ.cmds.push({ op: 'enqueue', qty: qty });
             });
-            controls.appendChild(btn);
+            qtyRow.appendChild(btn);
         }
+        void controls;
+        var section = h2.parentNode;                     // .workbench-section（position:relative）
         if (!doc.getElementById('cq-head-btn')) {
-            var head = doc.createElement('div');
-            head.style.cssText = 'width:100%;display:flex;align-items:center;justify-content:space-between;margin-bottom:12px';
-            h2.parentNode.insertBefore(head, h2);
-            head.appendChild(h2); h2.style.width = 'auto'; h2.style.margin = '0';
-            var hb = doc.createElement('button');
+            var hb = doc.createElement('button');        // absolute 挂右上角：不动 h2（官方 > 选择器依赖结构）
             hb.className = 'cq-head-btn'; hb.id = 'cq-head-btn';
             hb.innerHTML = '队列 <span class="cq-badge zero" id="cq-badge">0</span>';
             hb.addEventListener('click', function () {
                 var p = doc.getElementById('cq-panel'); if (p) p.classList.toggle('open');
             });
-            head.appendChild(hb);
+            section.appendChild(hb);
         }
         if (!doc.getElementById('cq-panel')) {
             var p = doc.createElement('div');
@@ -160,7 +187,7 @@
         var bs = doc.querySelectorAll('.cq-cancel');
         for (var i = 0; i < bs.length; i++)
             bs[i].addEventListener('click', function (e) {
-                send(winOf(doc), { qty: 1, cqCancel: parseInt(e.currentTarget.getAttribute('data-id'), 10) || 0 });
+                CQ.cmds.push({ op: 'cancel', id: parseInt(e.currentTarget.getAttribute('data-id'), 10) || 0 });
             });
     }
 
@@ -176,7 +203,7 @@
     setInterval(function () {
         var f = findToolTable();
         if (!f) return;
-        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); render(f.doc); return; }
+        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); hookSend(f.win); render(f.doc); return; }
         var d = CQ.data;
         if (!d) return;
         // making 进度推进（C# 只推结构签名）

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using GameCore.HotUpdate;
 using GameCore.HotUpdate.Battle.Logic;
+using GameCore.HotUpdate.ReduxUI;
 
 namespace SurvivalLog.CraftQueue;
 
@@ -121,26 +122,42 @@ internal static class QueueRunner
 
     // ── 入队（QueueUi 调）────────────────────────────────────────────
 
-    internal static bool Enqueue(int recipeId, int qty, out string failMsg)
+    /// <summary>
+    /// 入队（官方心智：台面有料即可做）。第一件=台面现料搬进抽屉预占；后续件按配方表取料。
+    /// 台面=当前打开的工作台（CurrentFurnitureId）；配方=官方 GetProductionByMaterials 反推。
+    /// </summary>
+    internal static bool Enqueue(int qty, out string failMsg)
     {
         failMsg = "";
         qty = Math.Clamp(qty, 1, 99);
-        var cfg = MaterialPicker.ProductionCfg(recipeId);
-        if (cfg == null) { failMsg = "配方不存在"; return false; }
+        var im = IM();
+        var drawerOwner = DrawerOwner();
+        long benchFurn = QueueUi.CurrentToolTableFurnitureId();
+        if (benchFurn == 0) { failMsg = "工作台未打开"; return false; }
+        Il2CppSystem.Collections.Generic.List<ItemData> bench = null;
+        try { bench = im.GetItemDataList(benchFurn); } catch { }
+        if (bench == null || bench.Count == 0) { failMsg = "请先把材料放上工作台（点配方或拖材料）"; return false; }
 
-        var ids = MaterialPicker.PickAndReserve(recipeId, out var fail);
-        if (fail != PickFail.None || ids.Count == 0)
+        var benchIds = new List<long>();
+        var matIds = new Il2CppSystem.Collections.Generic.List<int>();
+        for (int i = 0; i < bench.Count; i++)
         {
-            failMsg = fail switch
-            {
-                PickFail.Shortage => "材料不足（背包/柜子/抽屉可用量不够）",
-                PickFail.DrawerFull => "工作台抽屉放不下预占材料",
-                PickFail.Variant => "含染料变体的配方暂不支持队列",
-                PickFail.NoRecipe => "配方不存在",
-                _ => "取料失败",
-            };
-            return false;
+            long id = 0; int cid = 0, cnt = 0;
+            try { id = bench[i].InstanceId; cid = bench[i].ItemConfigId; cnt = bench[i].ItemCount; } catch { continue; }
+            if (id == 0) continue;
+            benchIds.Add(id);
+            for (int k = 0; k < cnt; k++) matIds.Add(cid);
         }
+        if (matIds.Count == 0) { failMsg = "请先把材料放上工作台"; return false; }
+
+        Config_ProductionList cfg = null;
+        try { cfg = CM().GetProductionByMaterials(matIds)?.Item1; } catch { }
+        if (cfg == null) { failMsg = "台面上的材料不构成配方"; return false; }
+
+        // 台面现料搬进抽屉=第一件预占；搬运不完整=抽屉满，放弃
+        int moved = 0;
+        try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchFurn, drawerOwner, true); } catch { }
+        if (moved != benchIds.Count) { failMsg = "工作台抽屉放不下材料"; return false; }
 
         string name = ""; int icon = 0; bool isFurn = false;
         try
@@ -162,20 +179,36 @@ internal static class QueueRunner
 
         var t = new CraftTask
         {
-            RecipeId = recipeId,
-            ProductName = string.IsNullOrEmpty(name) ? ("配方#" + recipeId) : name,
+            RecipeKey = "cfg:" + cfg.ID,        // 后续件取料按配方表
+            ProductName = string.IsNullOrEmpty(name) ? "配方" : name,
             ProductIconId = icon,
             Left = qty,
             Total = qty,
             IsFurniture = isFurn,
             Status = TaskStatus.Queued,
         };
-        t.ReservedItemIds.AddRange(ids);
+        t.ReservedItemIds.AddRange(benchIds);
         QueueState.Add(t);
         QueueState.SyncReservedIds();
         if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty} 预占 {ids.Count} 件物品");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（台面现料 {benchIds.Count} 件已锁抽屉）");
         return true;
+    }
+
+    /// <summary>后续件/恢复件取料：RecipeKey="cfg:ID" → 配方表 MaterialList。</summary>
+    private static Il2CppSystem.Collections.Generic.List<int> MatsOf(CraftTask t)
+    {
+        try
+        {
+            int cfgId = 0;
+            if (t.RecipeKey != null && t.RecipeKey.StartsWith("cfg:") && int.TryParse(t.RecipeKey.Substring(4), out cfgId))
+            {
+                var cfg = CM()?.Get_Config_ProductionList(cfgId);
+                if (cfg?.MaterialList != null) return cfg.MaterialList;
+            }
+        }
+        catch { }
+        return null;
     }
 
     // ── 取消（QueueUi 调）────────────────────────────────────────────
@@ -307,7 +340,7 @@ internal static class QueueRunner
         }
         else
         {
-            var ids = MaterialPicker.PickAndReserve(t.RecipeId, out var fail);
+            var ids = MaterialPicker.PickAndReserve(MatsOf(t), out var fail);
             if (fail == PickFail.None && ids.Count > 0)
             {
                 t.ReservedItemIds.AddRange(ids);
@@ -400,7 +433,7 @@ internal static class QueueRunner
     private static bool TryRecoverBlocked(CraftTask t)
     {
         t.ReservedItemIds.Clear();
-        var ids = MaterialPicker.PickAndReserve(t.RecipeId, out var fail);
+        var ids = MaterialPicker.PickAndReserve(MatsOf(t), out var fail);
         if (fail != PickFail.None || ids.Count == 0) return false;
         t.ReservedItemIds.AddRange(ids);
         t.BlockedReason = "";
@@ -408,6 +441,31 @@ internal static class QueueRunner
         QueueState.SyncReservedIds();
         CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 补料恢复排队");
         return true;
+    }
+
+    /// <summary>按材料需求反查配方（MaterialList 计数一致；成品名/图标/家具标注，非关键路径）。</summary>
+    private static Config_ProductionList FindCfgByMaterials(Il2CppSystem.Collections.Generic.List<int> mats)
+    {
+        try
+        {
+            var dict = CM()?._Config_ProductionList_Dict;
+            if (dict == null || mats == null) return null;
+            var need = new Dictionary<int, int>();
+            for (int i = 0; i < mats.Count; i++) { need.TryGetValue(mats[i], out var n); need[mats[i]] = n + 1; }
+            foreach (var kv in dict)
+            {
+                var ml = kv.Value?.MaterialList;
+                if (ml == null || ml.Count != mats.Count) continue;
+                var cnt = new Dictionary<int, int>();
+                foreach (var m in ml) { cnt.TryGetValue(m, out var n); cnt[m] = n + 1; }
+                bool same = cnt.Count == need.Count;
+                if (same)
+                    foreach (var nk in need) { cnt.TryGetValue(nk.Key, out var v); if (v != nk.Value) { same = false; break; } }
+                if (same) return kv.Value;
+            }
+        }
+        catch { }
+        return null;
     }
 
     private static Il2CppSystem.Collections.Generic.List<long> ToIl2Cpp(List<long> src)

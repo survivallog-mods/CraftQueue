@@ -18,8 +18,8 @@ internal static class Program
     private static void Main()
     {
         // ── Add 自增与快照基本结构 ──
-        var t1 = new CraftTask { RecipeId = 1, ProductName = "木板", ProductIconId = 3, Left = 3, Total = 3 };
-        var t2 = new CraftTask { RecipeId = 2, ProductName = "储物柜", ProductIconId = 9, Left = 2, Total = 2, IsFurniture = true };
+        var t1 = new CraftTask { RecipeKey = "plank", ProductName = "木板", ProductIconId = 3, Left = 3, Total = 3 };
+        var t2 = new CraftTask { RecipeKey = "cab", ProductName = "储物柜", ProductIconId = 9, Left = 2, Total = 2, IsFurniture = true };
         var id1 = QueueState.Add(t1);
         var id2 = QueueState.Add(t2);
         Check("Add 自增 TaskId", id1 >= 1 && id2 == id1 + 1, $"id1={id1} id2={id2}");
@@ -62,7 +62,7 @@ internal static class Program
 
         // ── 名字转义 ──
         QueueState.Tasks.Clear(); QueueState.SyncReservedIds();
-        QueueState.Add(new CraftTask { RecipeId = 3, ProductName = "a\"b\\c", Left = 1, Total = 1 });
+        QueueState.Add(new CraftTask { RecipeKey = "x", ProductName = "a\"b\\c", Left = 1, Total = 1 });
         var j2 = QueueState.SnapshotJson();
         Check("ProductName 引号反斜杠转义", j2.Contains("\"name\":\"a\\\"b\\\\c\""), j2);
 

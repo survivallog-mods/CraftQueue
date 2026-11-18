@@ -53,10 +53,17 @@ internal static class CraftGate
     }
 
     /// <summary>返回 false=拦截本次点配方（官方自动取料不发生）。</summary>
+    private static int _diagCount;                       // 诊断期：首 5 条 RecipeClick 原始 payload 入日志
+
     private static bool Prefix(string JsonData)
     {
         try
         {
+            if (_diagCount < 5)
+            {
+                _diagCount++;
+                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Gate] RecipeClick payload#" + _diagCount + ": " + JsonData);
+            }
             if (QueueState.ReservedItemIds.Count == 0) return true;   // 无预占零干预
             var key = ExtractRecipeKey(JsonData);
             if (key == null) return true;

@@ -16,7 +16,7 @@ public enum TaskStatus
 public sealed class CraftTask
 {
     public int TaskId;
-    public int RecipeId;
+    public string RecipeKey = "";
     public string ProductName = "";
     public int ProductIconId;
     public int Left;                       // 剩余件数
