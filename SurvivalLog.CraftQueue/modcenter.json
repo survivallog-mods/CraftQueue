@@ -50,6 +50,14 @@
           "type": "bool",
           "def": false,
           "order": 10
+        },
+        {
+          "key": "Dev:SelfTest",
+          "label": "自动自测",
+          "badge": "dev",
+          "type": "bool",
+          "def": false,
+          "order": 20
         }
       ]
     }

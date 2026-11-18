@@ -24,6 +24,8 @@ namespace SurvivalLog.CraftQueue;
 internal static class QueueRunner
 {
     private static float _nextPoll;
+    private static float _drawerCountAt = -999f;
+    private static float _resumeAt;                          // 完成→下一件派发的错峰时刻
     private static long _busyFurnId;          // 当前派发到的家具（0=无在制）
     private static int _dispatchTick;         // 拒绝判定窗口计数
 
@@ -95,6 +97,7 @@ internal static class QueueRunner
         if (blocked != null && TryRecoverBlocked(blocked)) return;
 
         // ④ 派发队首
+        if (UnityEngine.Time.unscaledTime < _resumeAt) return;   // 完成错峰窗口
         var next = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Queued);
         if (next != null) TryDispatch(next);
     }
@@ -112,8 +115,13 @@ internal static class QueueRunner
                 if (cur > QueueState.StaminaMax) QueueState.StaminaMax = cur;   // 满值校准（精力≤上限）
             }
             var im = IM();
-            var items = im?.GetItemDataList(DrawerOwner());
-            QueueState.DrawerUsed = items?.Count ?? 0;
+            // 抽屉计数降频（5s）：GetItemDataList 非零开销，占用变化慢；精力保持 0.5s
+            if (UnityEngine.Time.unscaledTime - _drawerCountAt > 5f)
+            {
+                _drawerCountAt = UnityEngine.Time.unscaledTime;
+                var items = im?.GetItemDataList(DrawerOwner());
+                QueueState.DrawerUsed = items?.Count ?? 0;
+            }
             // 抽屉容量 v1 固定最小档 120（5010=120/5012=132/5013=144；档位运行时读取路径
             // GetDrawerBagId 归属类不明，见 ledger Ruling，保守取最小档只影响高档位提前满判定）
         }
@@ -132,10 +140,12 @@ internal static class QueueRunner
         qty = Math.Clamp(qty, 1, 99);
         var im = IM();
         var drawerOwner = DrawerOwner();
-        long benchFurn = QueueUi.CurrentToolTableFurnitureId();
-        if (benchFurn == 0) { failMsg = "工作台未打开"; return false; }
+        // 台面（备料格 bag 1010）owner=独立 id（官方 State_Web_ToolTable.WorkbenchOwnerId），
+        // 非家具 id——家具 id 查台面恒空（实机 CDP+日志联证）
+        long benchOwner = CraftGate.BenchOwner();
+        if (benchOwner == 0) { failMsg = "工作台未打开"; return false; }
         Il2CppSystem.Collections.Generic.List<ItemData> bench = null;
-        try { bench = im.GetItemDataList(benchFurn); } catch { }
+        try { bench = im.GetItemDataList(benchOwner); } catch { }
         if (bench == null || bench.Count == 0) { failMsg = "请先把材料放上工作台（点配方或拖材料）"; return false; }
 
         var benchIds = new List<long>();
@@ -152,11 +162,18 @@ internal static class QueueRunner
 
         Config_ProductionList cfg = null;
         try { cfg = CM().GetProductionByMaterials(matIds)?.Item1; } catch { }
-        if (cfg == null) { failMsg = "台面上的材料不构成配方"; return false; }
+        if (cfg == null)
+        {
+            var dbg = new System.Text.StringBuilder();
+            for (int i = 0; i < matIds.Count && i < 12; i++) dbg.Append(' ').Append(matIds[i]);
+            CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 台面材料不构成配方（{matIds.Count} 件）：{dbg}");
+            failMsg = "台面上的材料不构成配方";
+            return false;
+        }
 
         // 台面现料搬进抽屉=第一件预占；搬运不完整=抽屉满，放弃
         int moved = 0;
-        try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchFurn, drawerOwner, true); } catch { }
+        try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchOwner, drawerOwner, true); } catch { }
         if (moved != benchIds.Count) { failMsg = "工作台抽屉放不下材料"; return false; }
 
         string name = ""; int icon = 0; bool isFurn = false;
@@ -277,8 +294,6 @@ internal static class QueueRunner
                 if (kv.Value == null) continue;
                 if (kv.Key == openFurn) continue;                       // 避开当前打开的台：官方 UI 对当前台 Making 弹制作遮罩并锁界面——队列走别的台（单台=关界面后开工）
                 if ((int)kv.Value.State != 0) continue;                 // 非 Idle=忙（含前台在制/没收成品）
-                var bench = IM()?.GetItemDataList(kv.Key);
-                if (bench != null && bench.Count > 0) continue;         // 台面有遗留物=前台没收，不占用
                 return kv.Key;
             }
         }
@@ -317,9 +332,14 @@ internal static class QueueRunner
         }
 
         // WaitingReceive：正常完成收尾；NoReceive：产出接收异常（语义未实证）——照搬台面物品但任务挂起（终审 I13）
-        try { CollectProducts(_busyFurnId); }
-        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收尾异常: " + e.Message); }
+        // 计时日志：完成卡顿定位（>300ms 的段直接入日志）
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         ResetFurnState(_busyFurnId);
+        if (sw.ElapsedMilliseconds > 300) CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 收尾耗时 复位={sw.ElapsedMilliseconds}ms");
+        var swp = System.Diagnostics.Stopwatch.StartNew();
+        try { CollectProducts(t, _busyFurnId); }
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收尾异常: " + e.Message); }
+        if (swp.ElapsedMilliseconds > 300) CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 收尾耗时 成品搬运={swp.ElapsedMilliseconds}ms");
         _busyFurnId = 0;
 
         t.ReservedItemIds.Clear();
@@ -334,6 +354,7 @@ internal static class QueueRunner
         }
         t.Left--;
         QueueState.JustFinishedTaskId = t.TaskId;            // js 据此自动清官方成品弹窗（终审 I4/I5）
+        _resumeAt = UnityEngine.Time.unscaledTime + 1.5f;    // 错峰：给官方完成链（统计/notify）让路，治连续卡顿
         if (t.Left <= 0)
         {
             t.Status = TaskStatus.Done;
@@ -357,47 +378,57 @@ internal static class QueueRunner
         }
     }
 
-    /// <summary>成品搬抽屉，装不下逐件落地（spec §5.4；家具包裹官方已送玄关、台面无物自然跳过）。</summary>
-    private static void CollectProducts(long furnId)
+    /// <summary>
+    /// 成品收尾（2026-11-19 全容器取证定案）：官方 TryCreateItem 的成品进玩家背包（全局 owner），
+    /// 随后游戏机器人归置会把它搬进柜子/抽屉（按标签）。队列语义=尽量进抽屉：
+    /// ① 完成后 0.5s 轮询窗口内从背包抢搬抽屉；② 抽屉装不下→逐件掉落地面；
+    /// ③ 背包已没有=机器人已归置→接受，日志说明。
+    /// （旧逻辑查 furnId 台面/全容器扫描均废弃——成品不经台面。）
+    /// </summary>
+    private static void CollectProducts(CraftTask t, long furnId)
     {
+        if (t.IsFurniture || t.ProductIconId <= 0) return;      // 家具包裹：官方直送玄关
         var im = IM();
         var drawerOwner = DrawerOwner();
-        var bench = im?.GetItemDataList(furnId);
-        if (bench == null || bench.Count == 0) return;                  // 家具包裹：官方直送玄关
-        var ids = new List<long>();
-        for (int i = 0; i < bench.Count; i++)
+        long bagOwner = 0;
+        try { bagOwner = ActionDispatcher.GetLeadingRoleAgentId(); } catch { }
+        if (bagOwner == 0 || im == null) return;
+
+        var bagList = im.GetItemDataList(bagOwner);
+        var found = new List<long>();
+        if (bagList != null)
         {
-            long id = 0;
-            try { id = bench[i].InstanceId; } catch { }
-            if (id != 0) ids.Add(id);
+            for (int i = 0; i < bagList.Count; i++)
+            {
+                try { if (bagList[i].ItemConfigId == t.ProductIconId) found.Add(bagList[i].InstanceId); } catch { }
+            }
         }
-        if (ids.Count == 0) return;
+        if (found.Count == 0)
+        {
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品 #{t.ProductIconId} 不在背包——已被游戏归置（机器人/其他），接受该去向");
+            return;
+        }
         int moved = 0;
-        try { moved = im.TryQuickMoveItems(ToIl2Cpp(ids), furnId, drawerOwner, true); } catch { }
-        if (moved == ids.Count)
+        try { moved = im.TryQuickMoveItems(ToIl2Cpp(found), bagOwner, drawerOwner, true); } catch { }
+        if (moved == found.Count)
         {
             CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品入抽屉 ×{moved}");
             return;
         }
-        // 装不下/半搬：残留逐件掉落地面。先提取 id 快照再逐个 Drop（终审 I6：Il2Cpp 列表边删边遍历失效）
-        var leftList = im.GetItemDataList(furnId);
-        if (leftList != null && leftList.Count > 0)
+        var leftList = im.GetItemDataList(bagOwner);
+        var dropIds = new List<long>();
+        if (leftList != null)
         {
-            var dropIds = new List<long>();
             for (int i = 0; i < leftList.Count; i++)
             {
-                long id = 0;
-                try { id = leftList[i].InstanceId; } catch { }
-                if (id != 0) dropIds.Add(id);
+                try { if (leftList[i].ItemConfigId == t.ProductIconId) dropIds.Add(leftList[i].InstanceId); } catch { }
             }
-            var dim = DIM();
-            int dropped = 0;
-            foreach (var id in dropIds)
-                try { if (dim.DropItemFromBag(id)) dropped++; } catch { }
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}，落地 {dropped}");
-            return;
         }
-        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}");
+        var dim = DIM();
+        int dropped = 0;
+        foreach (var id in dropIds)
+            try { if (dim.DropItemFromBag(id)) dropped++; } catch { }
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}，落地 {dropped}");
     }
 
     /// <summary>直写复位（Ruling 见类头）：State=Idle + 清预扣清单。</summary>

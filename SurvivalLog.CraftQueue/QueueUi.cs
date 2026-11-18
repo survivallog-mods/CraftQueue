@@ -90,7 +90,13 @@ internal static class QueueUi
                     var world = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.Instance;
                     var curMaking = world != null && world._ToolTableManager != null &&
                         world._ToolTableManager.GetToolTableState(furn) == GameCore.HotUpdate.HandMadeState.Making;
-                    if (!curMaking) rp.Value = false;
+                    if (!curMaking)
+                    {
+                        rp.Value = false;
+                        // 成品弹窗同源压制：ResultShow=true=官方完成链推了结果弹窗（队列台的）——关掉
+                        var rs = st.ResultShow;
+                        if (rs != null && rs.Value) rs.Value = false;
+                    }
                 }
             }
         }
@@ -122,7 +128,10 @@ internal static class QueueUi
                     if (QueueRunner.Enqueue(qty <= 0 ? 1 : qty, out var failMsg))
                         Ac_PopText_AddPopText.SendAction("已加入制作队列（材料已锁进抽屉）");
                     else
+                    {
+                        CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 入队失败: " + failMsg);
                         Ac_PopText_AddPopText.SendAction("入队失败：" + failMsg);
+                    }
                 }
                 else if (op == "cancel")
                 {
@@ -182,6 +191,8 @@ internal static class QueueUi
         }
         catch { return null; }
     }
+
+    internal static State_Web_ToolTable ToolTableStatePublic() => ToolTableState();
 
     /// <summary>ToolTable state（界面未开=null，DrawerTabs.GetStateByUI 同款非泛型路径）。</summary>
     private static State_Web_ToolTable ToolTableState()
