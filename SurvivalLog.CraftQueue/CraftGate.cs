@@ -40,8 +40,11 @@ internal static class CraftGate
             }
             var h = new HarmonyLib.Harmony("com.local.survivallog.craftqueue.gate");
             h.Patch(original, prefix: new HarmonyLib.HarmonyMethod(typeof(CraftGate), nameof(Prefix)));
+            var again = HarmonyLib.AccessTools.Method(typeof(Ac_ToolTable_CraftAgain), "SendAction");
+            if (again != null)
+                h.Patch(again, prefix: new HarmonyLib.HarmonyMethod(typeof(CraftGate), nameof(PrefixCraftAgain)));
             _installed = true;
-            CraftQueuePlugin.Log.LogInfo("[CraftQueue.Gate] 前台取料拦截钩已挂（RecipeClick）");
+            CraftQueuePlugin.Log.LogInfo("[CraftQueue.Gate] 前台取料拦截钩已挂（RecipeClick+CraftAgain）");
         }
         catch (Exception e)
         {
@@ -70,10 +73,11 @@ internal static class CraftGate
                 need.TryGetValue(m, out var n);
                 need[m] = n + 1;
             }
+            var bench = BenchOwner();                                       // 台面计入可用量（终审 I8）
             var lack = new List<string>();
             foreach (var kv in need)
             {
-                if (MaterialPicker.CountAvailExcludingReserved(kv.Key) < kv.Value)
+                if (MaterialPicker.CountAvailExcludingReserved(kv.Key, bench) < kv.Value)
                     lack.Add("#" + kv.Key);
             }
             if (lack.Count == 0) return true;                          // 刨除预占后仍够：放行，无感
@@ -102,6 +106,43 @@ internal static class CraftGate
         int q2 = json.IndexOf('"', q1 + 1);
         if (q2 < 0) return null;
         return json.Substring(q1 + 1, q2 - q1 - 1);
+    }
+
+    /// <summary>当前打开工作台的台面 owner（前台判定口径用；界面未开=0）。</summary>
+    private static long BenchOwner()
+    {
+        try
+        {
+            if (!BaseSingleton<GameCore.HotUpdate.ReduxUI.ReduxUISystem>.IsInstanceCreated) return 0;
+            var st = BaseSingleton<GameCore.HotUpdate.ReduxUI.ReduxUISystem>.Instance
+                .GetStateByUI(QueueUi.ToolTableStateType)?.TryCast<GameCore.HotUpdate.ReduxUI.State_Web_ToolTable>();
+            var rp = st?.WorkbenchOwnerId; return rp != null ? rp.Value : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>「再造一次」入口（终审 I9：CraftAgain 重取料可吃预占料，同口径拦）。</summary>
+    private static bool PrefixCraftAgain()
+    {
+        try
+        {
+            if (QueueState.ReservedItemIds.Count == 0) return true;
+            var recipeId = LastRecipeId;                        // 再造=最近配方
+            if (recipeId <= 0) return true;
+            var cfg = MaterialPicker.ProductionCfg(recipeId);
+            if (cfg?.MaterialList == null || cfg.MaterialList.Count == 0) return true;
+            var need = new Dictionary<int, int>();
+            foreach (var m in cfg.MaterialList) { need.TryGetValue(m, out var n); need[m] = n + 1; }
+            var bench = BenchOwner();
+            foreach (var kv in need)
+                if (MaterialPicker.CountAvailExcludingReserved(kv.Key, bench) < kv.Value)
+                {
+                    Ac_PopText_AddPopText.SendAction("材料已被队列任务占用，请补充材料或取消队列任务");
+                    return false;
+                }
+        }
+        catch { }
+        return true;
     }
 
     /// <summary>QueueUi 入队用：最近前台配方 → 配方 ID（解析失败 0）。</summary>

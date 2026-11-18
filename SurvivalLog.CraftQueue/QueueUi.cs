@@ -23,6 +23,7 @@ namespace SurvivalLog.CraftQueue;
 internal static class QueueUi
 {
     private static string _bootstrap;            // queueui.page.js 全文（EmbeddedResource 一次读）
+    private static bool _bootstrapFailed;
     private static float _nextPoll;
     private static string _lastSig = "";         // 快照签名（变化才推）
     private static State_Web_ToolTable _wrappedState;   // 已包装 Btn_Craft 的 state 实例
@@ -40,8 +41,8 @@ internal static class QueueUi
     {
         var web = GetWebView();
         if (web == null) return;
-        if (_bootstrap == null) _bootstrap = ReadBootstrap();
-        if (_bootstrap == null) return;
+        if (_bootstrap == null && !_bootstrapFailed) _bootstrap = ReadBootstrap();
+        if (_bootstrap == null) { _bootstrapFailed = true; return; }   // 终审 I15：失败不刷屏重试
 
         // ① bootstrap 幂等注入（WebView 重建自动重挂；页面侧 IIFE 双重幂等）
         web.ExecuteJavaScript("window.__CQ__||(" + _bootstrap + ")");
@@ -51,10 +52,13 @@ internal static class QueueUi
 
         // ③ 快照推送：签名变化才推
         var snap = QueueState.SnapshotJson();
-        var sig = QueueState.StaminaPaused + "|" + QueueState.DrawerUsed + "|" +
+        // 签名含精力/可做件数/刚完成标记（终审 I12/I19）；制作中百分比仍由 js 本地补间
+        var sig = (int)QueueState.Stamina + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
+                  QueueState.DrawerUsed + "|" + QueueState.JustFinishedTaskId + "|" +
                   QueueState.Tasks.Count + "|" + (QueueState.Tasks.Count > 0 ? QueueState.Tasks[0].TaskId + ":" + (int)QueueState.Tasks[0].Status + ":" + QueueState.Tasks[0].Left : "");
-        // 注意：单任务快照签名只覆盖队首进度（left/status），制作中进度百分比不推（js 端本地动画补间）
-        if (sig == _lastSig) return;
+        if (sig == _lastSig) { if (QueueState.JustFinishedTaskId != 0) QueueState.JustFinishedTaskId = 0; return; }
+        var jf = QueueState.JustFinishedTaskId;
+        QueueState.JustFinishedTaskId = 0;      // 已入快照：消费即清（下轮不再误报）
         _lastSig = sig;
         web.ExecuteJavaScript("window.__CQ__&&__CQ__.setData(" + QuoteJs(snap) + ")");
     }
@@ -71,7 +75,7 @@ internal static class QueueUi
         catch { return null; }
     }
 
-    private static readonly Il2CppSystem.Type ToolTableStateType =
+    internal static readonly Il2CppSystem.Type ToolTableStateType =
         Il2CppInterop.Runtime.Il2CppType.From(typeof(State_Web_ToolTable));
 
     /// <summary>ToolTable state（界面未开=null，DrawerTabs.GetStateByUI 同款非泛型路径）。</summary>
@@ -102,40 +106,37 @@ internal static class QueueUi
             CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] Btn_Craft 已包装（队列通道）");
     }
 
-    /// <summary>CRAFT 事件包装：cqEnqueue/cqCancel 标记=队列语义；否则透传官方。</summary>
+    /// <summary>CRAFT 事件包装：cqEnqueue/cqCancel 标记=队列语义（任何路径都不透传，终审 I14）；
+    /// 无标记才透传官方。</summary>
     private static void HandleCraft(string json, Il2CppSystem.Action<string> orig)
     {
-        try
+        var marker = !string.IsNullOrEmpty(json) && (json.Contains("cqCancel") || json.Contains("cqEnqueue"));
+        if (marker)
         {
-            if (!string.IsNullOrEmpty(json) && json.Contains("cqCancel"))
+            try
             {
-                var id = ExtractInt(json, "cqCancel");
-                if (id > 0)
+                if (json.Contains("cqCancel"))
                 {
-                    QueueRunner.Cancel(id, out _);
-                    QueueUi.PushSnapshotNow();   // 取消立即回推
+                    var id = ExtractInt(json, "cqCancel");
+                    if (id > 0) QueueRunner.Cancel(id, out _);
                 }
-                return;
-            }
-            if (!string.IsNullOrEmpty(json) && json.Contains("cqEnqueue"))
-            {
-                var qty = ExtractInt(json, "qty");
-                var recipeId = CraftGate.LastRecipeId;
-                if (recipeId <= 0)
-                {
-                    Ac_PopText_AddPopText.SendAction("请先在制造笔记选择配方");
-                    return;
-                }
-                if (QueueRunner.Enqueue(recipeId, qty <= 0 ? 1 : qty, out var failMsg))
-                    Ac_PopText_AddPopText.SendAction("已加入制作队列（材料已锁进抽屉）");
                 else
-                    Ac_PopText_AddPopText.SendAction("入队失败：" + failMsg);
-                QueueUi.PushSnapshotNow();
-                return;
+                {
+                    var qty = ExtractInt(json, "qty");
+                    var recipeId = CraftGate.LastRecipeId;
+                    if (recipeId <= 0)
+                        Ac_PopText_AddPopText.SendAction("请先在制造笔记选择配方");
+                    else if (QueueRunner.Enqueue(recipeId, qty <= 0 ? 1 : qty, out var failMsg))
+                        Ac_PopText_AddPopText.SendAction("已加入制作队列（材料已锁进抽屉）");
+                    else
+                        Ac_PopText_AddPopText.SendAction("入队失败：" + failMsg);
+                }
             }
+            catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 队列事件处理异常: " + e.Message); }
+            PushSnapshotNow();                   // 取消/入队立即回推
+            return;                              // 命中标记：绝不透传（防双发）
         }
-        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 队列事件处理异常: " + e.Message); }
-        try { orig?.Invoke(json); } catch { }                                   // 透传官方
+        try { orig?.Invoke(json); } catch { }    // 无标记：透传官方
     }
 
     /// <summary>取消/入队后立即回推快照（不等 0.5s 签名周期）。</summary>

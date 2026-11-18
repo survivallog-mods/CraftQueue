@@ -68,11 +68,11 @@
     }
 
     function mount(doc, win) {
-        var controls = doc.getElementById('craft-controls');
+        var controls = doc.querySelector('.craft-controls');   // 终审 C1：官方是 class 非 id
         var h2 = doc.querySelector('.workbench-section > h2');
         if (!controls || !h2) return;
-        if (!CQ.cssDone) {
-            var st = doc.createElement('style'); st.textContent = CSS; doc.head.appendChild(st); CQ.cssDone = true;
+        if (!doc.getElementById('cq-style')) {                        // 终审 I10：按元素存在性（iframe 重建后重注）
+            var st = doc.createElement('style'); st.id = 'cq-style'; st.textContent = CSS; doc.head.appendChild(st);
         }
         if (!doc.getElementById('cq-enqueue')) {
             var btn = doc.createElement('button');
@@ -118,7 +118,7 @@
         if (!bd) return;                        // 面板还没挂上（mount 失败）
         bd.textContent = n; bd.className = 'cq-badge' + (n ? '' : ' zero');
         pb.textContent = n; pb.className = 'cq-badge' + (n ? '' : ' zero');
-        doc.getElementById('cq-stv').textContent = d.stamina + ' / ' + d.staminaMax + '（还能做 ' + Math.floor(d.stamina / 8) + ' 件）';
+        doc.getElementById('cq-stv').textContent = d.stamina + ' / ' + d.staminaMax + '（还能做 ' + (d.canMake || 0) + ' 件）';
         doc.getElementById('cq-stf').style.width = (d.staminaMax > 0 ? d.stamina / d.staminaMax * 100 : 0) + '%';
         doc.getElementById('cq-pause').classList.toggle('show', !!d.paused);
         doc.getElementById('cq-dv').textContent = d.drawerUsed + ' / ' + d.drawerCap + ' 格';
@@ -171,18 +171,31 @@
     function winOf(doc) { try { return doc.defaultView; } catch (e) { return null; } }
     function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
 
-    // 官方成品弹窗自动清（UI 开着时队列任务完成）：毫秒级先于玩家，收下=空操作（成品已被搬抽屉）
+    // 250ms 自愈轮询：①重开界面主动补挂（终审 I11）②making 进度本地推进（I12）
+    // ③官方成品弹窗只在 justFinished 标志时自动收（I4/I5：不与 runner 收尾赛跑、不抢官方前台弹窗）
     setInterval(function () {
-        var f = findToolTable(); if (!f) return;
-        var box = f.doc.getElementById('crafting-result-box');
-        if (box && box.style.display !== 'none' && !box.dataset.cqAuto) {
-            // 仅在队列有刚完成任务时自动收（保守：官方前台弹窗不打扰）——v1 简化：队列在制即视为自家
-            var d = CQ.data;
-            if (d && d.tasks && d.tasks.length) {
-                box.dataset.cqAuto = '1';
+        var f = findToolTable();
+        if (!f) return;
+        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); render(f.doc); return; }
+        var d = CQ.data;
+        if (!d) return;
+        // making 进度推进（C# 只推结构签名）
+        var list = f.doc.getElementById('cq-list');
+        if (list && d.tasks) {
+            for (var i = 0; i < d.tasks.length; i++) {
+                var t = d.tasks[i];
+                if (t.status !== 'making') continue;
+                var el = list.querySelector('.cq-task[data-id="' + t.id + '"] .cq-bar i');
+                if (el) { var w = Math.min(100, (parseFloat(el.style.width) || 0) + 2); el.style.width = w + '%'; }
+            }
+        }
+        // justFinished：该弹窗属于队列成品（已被 runner 搬抽屉，收下=清窗空操作）
+        if (CQ.jfSeen !== d.justFinished && d.justFinished > 0) {
+            CQ.jfSeen = d.justFinished;
+            var box = f.doc.getElementById('crafting-result-box');
+            if (box && box.style.display !== 'none') {
                 var take = f.doc.getElementById('res-btn-take');
                 if (take) take.click();
-                setTimeout(function () { if (box) delete box.dataset.cqAuto; }, 500);
             }
         }
     }, 250);

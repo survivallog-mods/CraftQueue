@@ -54,9 +54,24 @@ internal static class QueueRunner
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 轮询异常: " + e.Message); }
     }
 
+    private static BattleLogicWorld _worldRef;          // 世界重绑检测（终审 I7：读档/切档清队列）
+
     private static void Poll()
     {
-        if (TTM() == null) return;
+        var world = World();
+        if (world == null) return;
+        if (!ReferenceEquals(world, _worldRef))
+        {
+            // 新 BattleLogicWorld 实例=读档/切档：队列/预占/在制记录全部失效（spec §5.8 会话语义）
+            _worldRef = world;
+            if (QueueState.Tasks.Count > 0 || _busyFurnId != 0)
+                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Runner] 世界重建：队列清空（抽屉材料保留）");
+            QueueState.Tasks.Clear();
+            QueueState.ReservedItemIds.Clear();
+            QueueState.StaminaPaused = false;
+            QueueState.JustFinishedTaskId = 0;
+            _busyFurnId = 0;
+        }
         RefreshRuntimeFields();
 
         // ① 在制任务收尾检测（Review Focus 1：只认自己派发的 _busyFurnId，官方/前台任务不碰）
@@ -89,9 +104,12 @@ internal static class QueueRunner
         try
         {
             var ttm = TTM();
-            ttm.GetCraftStamina(out var cur, out _);
-            QueueState.Stamina = cur;
-            if (cur > QueueState.StaminaMax) QueueState.StaminaMax = cur;   // 满值校准（精力≤上限）
+            if (ttm.GetCraftStamina(out var cur, out var req))             // 终审 I22：false 不更新
+            {
+                QueueState.Stamina = cur;
+                if (req > 0) QueueState.CanMake = (int)(cur / req);
+                if (cur > QueueState.StaminaMax) QueueState.StaminaMax = cur;   // 满值校准（精力≤上限）
+            }
             var im = IM();
             var items = im?.GetItemDataList(DrawerOwner());
             QueueState.DrawerUsed = items?.Count ?? 0;
@@ -263,7 +281,7 @@ internal static class QueueRunner
             return;
         }
 
-        // WaitingReceive / NoReceive：完成 → 成品收尾
+        // WaitingReceive：正常完成收尾；NoReceive：产出接收异常（语义未实证）——照搬台面物品但任务挂起（终审 I13）
         try { CollectProducts(_busyFurnId); }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收尾异常: " + e.Message); }
         ResetFurnState(_busyFurnId);
@@ -271,7 +289,16 @@ internal static class QueueRunner
 
         t.ReservedItemIds.Clear();
         QueueState.SyncReservedIds();
+        bool bad = state == HandMadeState.NoReceive;
+        if (bad)
+        {
+            t.Status = TaskStatus.Blocked;
+            t.BlockedReason = "产出接收异常（NoReceive）";
+            _busyFurnId = 0;
+            return;
+        }
         t.Left--;
+        QueueState.JustFinishedTaskId = t.TaskId;            // js 据此自动清官方成品弹窗（终审 I4/I5）
         if (t.Left <= 0)
         {
             t.Status = TaskStatus.Done;
@@ -317,21 +344,25 @@ internal static class QueueRunner
             CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品入抽屉 ×{moved}");
             return;
         }
-        // 装不下/半搬：残留逐件掉落地面（CollectBatchProducts 同款语义）
-        var left = im.GetItemDataList(furnId);
-        var dim = DIM();
-        int dropped = 0;
-        if (left != null)
+        // 装不下/半搬：残留逐件掉落地面。先提取 id 快照再逐个 Drop（终审 I6：Il2Cpp 列表边删边遍历失效）
+        var leftList = im.GetItemDataList(furnId);
+        if (leftList != null && leftList.Count > 0)
         {
-            for (int i = 0; i < left.Count; i++)
+            var dropIds = new List<long>();
+            for (int i = 0; i < leftList.Count; i++)
             {
                 long id = 0;
-                try { id = left[i].InstanceId; } catch { }
-                if (id == 0) continue;
-                try { if (dim.DropItemFromBag(id)) dropped++; } catch { }
+                try { id = leftList[i].InstanceId; } catch { }
+                if (id != 0) dropIds.Add(id);
             }
+            var dim = DIM();
+            int dropped = 0;
+            foreach (var id in dropIds)
+                try { if (dim.DropItemFromBag(id)) dropped++; } catch { }
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}，落地 {dropped}");
+            return;
         }
-        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}，落地 {dropped}");
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}");
     }
 
     /// <summary>直写复位（Ruling 见类头）：State=Idle + 清预扣清单。</summary>

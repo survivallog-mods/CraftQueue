@@ -16,8 +16,11 @@
   mod 只做调度：`StartProduction(furnId, 抽屉物品ids)` → 完成检测 → 成品搬抽屉/落地。
 - 预占=入队时按官方取料口径（台面→页签→背包→抽屉→柜子）选料搬进抽屉，物品 id 进
   `ReservedItemIds` 集合；队列取料与前台拦截都以「刨除预占」为口径，队列内永不超发。
-- 前台拦截（E 方案）=Harmony prefix `Ac_ToolTable_Make/CraftAgain.SendAction`：
-  刨除预占后材料不够本次 → 拦截+提示「材料已被队列任务占用」。
+- 前台拦截（E 方案）=Harmony prefix **`Ac_ToolTable_RecipeClick/CraftAgain.SendAction`**
+  （实现期修正：取料在点配方，Make 不取料）：刨除预占后台面+背包+柜子+抽屉可用量不够本次 →
+  拦截+提示「材料已被队列任务占用」。堆叠数超过需求的实例不整件预占（官方按整件消耗，
+  超额部分会被销毁）→ 返回 Partial 提示整理/拆堆。
+- 读档/切档：检测 BattleLogicWorld 实例重建即清空队列与预占（抽屉材料保留，spec §5.8）。
 - 红线：不改存档、不改游戏文件；队列与预占集合为会话内存，读档后队列清空（抽屉料仍在）。
 
 ## 3. 模块

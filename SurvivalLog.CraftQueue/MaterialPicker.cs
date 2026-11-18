@@ -14,6 +14,7 @@ public enum PickFail
     DrawerFull,   // 抽屉剩余格不够预占
     Variant,      // 配方含染料变体材料，v1 不支持（spec §7.5）
     NoRecipe,     // 配方 id 查无
+    Partial,      // 只有堆叠数超过需求的实例（整件预占会超额销毁多余部分，v1 不拆堆——终审 C3）
 }
 
 /// <summary>
@@ -110,6 +111,7 @@ internal static class MaterialPicker
         // 逐 owner 选料（顺序：背包 → 柜子 → 抽屉；抽屉候选剔除已预占）
         var pickedBySrc = new Dictionary<long, List<long>>();
         var remaining = new Dictionary<int, int>(need);
+        bool overStackOnly = false;
         foreach (var owner in CollectOwners())
         {
             if (remaining.Count == 0) break;
@@ -125,9 +127,10 @@ internal static class MaterialPicker
                 if (!remaining.TryGetValue(cid, out var left) || left <= 0) continue;
                 bool reserved = QueueState.ReservedItemIds.Contains(iid);
                 if (owner == drawerOwner && reserved) continue; // 抽屉只剔预占；其他源物品不可能预占（预占只在抽屉）
-                int take = Math.Min(left, cnt);
-                if (take <= 0) continue;
-                remaining[cid] = left - take;
+                // 终审 C3：官方 ForceRemoveItem 按整件消耗——堆叠数超过剩余需求的实例不可整件预占
+                //（否则多余部分被销毁）。只选 cnt <= left 的实例；全超则 Partial（提示整理/拆堆）。
+                if (cnt > left) { overStackOnly = true; continue; }
+                remaining[cid] = left - cnt;
                 if (remaining[cid] <= 0) remaining.Remove(cid);
                 if (!pickedBySrc.TryGetValue(owner, out var list))
                     pickedBySrc[owner] = list = new List<long>();
@@ -136,7 +139,7 @@ internal static class MaterialPicker
         }
         if (remaining.Count > 0)
         {
-            fail = PickFail.Shortage;
+            fail = overStackOnly ? PickFail.Partial : PickFail.Shortage;
             return result;
         }
 
@@ -166,8 +169,9 @@ internal static class MaterialPicker
     /// <summary>配方配置（Enqueue 建任务用；null=查无）。</summary>
     public static Config_ProductionList ProductionCfg(int recipeId) => CM()?.Get_Config_ProductionList(recipeId);
 
-    /// <summary>Task 5 前台拦截用：链上（背包+柜子+抽屉，刨除预占）某 configId 可用总数。</summary>
-    public static int CountAvailExcludingReserved(int configId)
+    /// <summary>前台拦截用：链上（背包+柜子+抽屉，刨除预占）某 configId 可用总数；
+    /// extraOwner=前台判定时的台面（spec §5.6.1 台面计入可用量，终审 I8）。</summary>
+    public static int CountAvailExcludingReserved(int configId, long extraOwner = 0)
     {
         var im = IM();
         var drawerOwner = DrawerOwner();

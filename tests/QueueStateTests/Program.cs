@@ -45,12 +45,14 @@ internal static class Program
         t2.Status = TaskStatus.Blocked;
         t2.BlockedReason = "预占材料被取走";
         QueueState.Stamina = 92; QueueState.StaminaMax = 100;
+        QueueState.CanMake = 11; QueueState.JustFinishedTaskId = 7;
         QueueState.StaminaPaused = true;
         QueueState.DrawerUsed = 5; QueueState.DrawerCap = 120;
         var json = QueueState.SnapshotJson();
         Console.WriteLine("snapshot: " + json);
         Check("快照含顶层运行字段",
             json.Contains("\"stamina\":92") && json.Contains("\"staminaMax\":100") &&
+            json.Contains("\"canMake\":11") && json.Contains("\"justFinished\":7") &&
             json.Contains("\"paused\":true") && json.Contains("\"drawerUsed\":5") && json.Contains("\"drawerCap\":120"));
         Check("快照任务字段",
             json.Contains("\"name\":\"储物柜\"") && json.Contains("\"icon\":9") &&

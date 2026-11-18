@@ -41,6 +41,8 @@ public static class QueueState
     public static float Stamina;
     public static float StaminaMax = 100f;
     public static bool StaminaPaused;
+    public static int CanMake;                 // 精力还能做几件（runner 按 req 计算，js 直显）
+    public static int JustFinishedTaskId;      // 刚收尾的任务（js 据此自动清官方成品弹窗；推送后由下轮签名变化清零）
     public static int DrawerUsed;
     public static int DrawerCap = 120;
 
@@ -78,6 +80,8 @@ public static class QueueState
         var sb = new StringBuilder(256);
         sb.Append("{\"stamina\":").Append((int)Stamina)
           .Append(",\"staminaMax\":").Append((int)StaminaMax)
+          .Append(",\"canMake\":").Append(CanMake)
+          .Append(",\"justFinished\":").Append(JustFinishedTaskId)
           .Append(",\"paused\":").Append(StaminaPaused ? "true" : "false")
           .Append(",\"drawerUsed\":").Append(DrawerUsed)
           .Append(",\"drawerCap\":").Append(DrawerCap)
