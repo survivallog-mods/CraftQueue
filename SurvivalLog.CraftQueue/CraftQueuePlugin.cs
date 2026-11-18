@@ -67,5 +67,6 @@ internal sealed class QueueTicker : MonoBehaviour
     public void Update()
     {
         QueueRunner.FastPoll();
+        QueueUi.FastPoll();
     }
 }

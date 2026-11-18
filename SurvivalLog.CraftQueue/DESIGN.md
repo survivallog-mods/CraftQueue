@@ -78,4 +78,21 @@
 - 手动 AccessTools.Method patch（CE CookingFxRefreshHook 同款），方法缺失=降级轻防御不炸。
 | QueueUi.cs + queueui.page.js | webui 注入：入队按钮/队列胶囊/队列面板 |
 
+### QueueUi 细节
+
+- 通道：WebView=ReduxUISystem.GetWebUILayer().canvasWebViewPrefab.WebView（CE RailUi 同源）；
+  ExecuteJavaScript 注入 Root 主文档，js 跨 `iframe#ToolTable` 挂 DOM（界面关=iframe 销毁，
+  数据缓存重开复用）。
+- **js→C# = 包装官方 `State_Web_ToolTable.Btn_Craft`**（Action&lt;string&gt; 属性）：
+  页面按钮发官方 `CRAFT` 事件、payload 多带 `cqEnqueue`/`cqCancel` 标记——包装 delegate 命中即
+  队列语义（入队用 CraftGate.LastRecipeId + qty；取消 taskId），未命中透传官方。零新事件通道；
+  UI 重开重建 state → 按实例引用幂等重包。
+- C#→js：快照签名（挂起/抽屉/任务数/队首态）变化才推 `__CQ__.setData(json)`；制作中进度条
+  js 本地补间（不逐拍推送，防闪烁同原型纪律）。
+- 官方成品弹窗：队列有任务时 js 检测 `#crafting-result-box` 出现自动点「收下」清窗
+  （毫秒级先于玩家；成品此时多已被 runner 搬抽屉，收下=空操作）。已知边界：玩家毫秒级抢先
+  手点收下→成品进背包而非抽屉（ledger）。
+- 入队交互：官方数量行 qty + mod「加入队列」按钮（craft-controls 追加）+ 标题行「队列 N」胶囊
+  （开/关右侧浮层面板：精力/挂起条/任务行/取消/抽屉占用）。
+
 （各模块随任务落地时补细节节。）

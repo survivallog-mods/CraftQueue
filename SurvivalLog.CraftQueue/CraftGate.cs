@@ -23,6 +23,9 @@ internal static class CraftGate
     private static bool _installed;
     private static Dictionary<string, int> _keyToRecipe;   // recipeKey → Config_ProductionList.ID（懒构建）
 
+    /// <summary>最近一次放行的前台配方 key（QueueUi 入队消费——官方 qty 行无配方信息）。</summary>
+    internal static string LastRecipeKey = "";
+
     internal static void Install()
     {
         if (_installed) return;
@@ -55,6 +58,7 @@ internal static class CraftGate
             var key = ExtractRecipeKey(JsonData);
             if (key == null) return true;
             var recipeId = ResolveRecipe(key);
+            if (recipeId > 0) LastRecipeKey = key;         // 放行前记录（QueueUi 入队用）
             if (recipeId <= 0) return true;                            // 认不出的 key 放行（官方自己会失败）
             var cfg = MaterialPicker.ProductionCfg(recipeId);
             if (cfg?.MaterialList == null || cfg.MaterialList.Count == 0) return true;
@@ -99,6 +103,9 @@ internal static class CraftGate
         if (q2 < 0) return null;
         return json.Substring(q1 + 1, q2 - q1 - 1);
     }
+
+    /// <summary>QueueUi 入队用：最近前台配方 → 配方 ID（解析失败 0）。</summary>
+    internal static int LastRecipeId => string.IsNullOrEmpty(LastRecipeKey) ? 0 : ResolveRecipe(LastRecipeKey);
 
     /// <summary>recipeKey → 配方 ID：官方同源 ToProductionKey 全表生成比对（懒构建缓存）。</summary>
     private static int ResolveRecipe(string key)
