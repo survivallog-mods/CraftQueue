@@ -52,6 +52,7 @@ public sealed class CraftQueuePlugin : BasePlugin
         var go = new GameObject("CraftQueue.Ticker");
         Object.DontDestroyOnLoad(go);
         go.AddComponent<QueueTicker>();
+        CraftGate.Install();
 
         Log.LogInfo("[CraftQueue] ticker ready");
     }

@@ -65,7 +65,17 @@
 - 取消 Dispatched：`ForceEndProduction` + 直写复位；料留抽屉（预占解除）。
 - 只认自己派发的 `_busyFurnId`——官方/前台任务与读档恢复的 Making 不被队列收尾。
 - 已知简化（ledger）：抽屉容量 v1 固定 120（最小档保守）；`ItemData.InstanceId` 跨包不变。
-| CraftGate.cs | 前台制作拦截（Make/CraftAgain 双入口） |
+| CraftGate.cs | 前台取料拦截（RecipeClick 入口，手动 Harmony prefix） |
+
+### CraftGate 细节
+
+- **拦截点=RecipeClick**（实现期取证修正）：前台取料发生在点配方（RA_ToolTable_RecipeClick →
+  ApplyFillRecipe），「制造」只消费台面已放料不再取料——单点覆盖主路径；CraftAgain 重取料但
+  撞预占概率极低（刚做完=链上料足），派发校验兜底，v1 不拦。
+- 判定：无预占零干预 → recipeKey 反查配方（官方 `ToProductionKey` 同源全表生成缓存；
+  key=材料 id 排序串，反汇编实证）→ 逐材料 `CountAvailExcludingReserved ≥ 需求`，任一不足
+  → 拦截（return false）+ `Ac_PopText_AddPopText` 提示；判定异常放行（官方兜底）。
+- 手动 AccessTools.Method patch（CE CookingFxRefreshHook 同款），方法缺失=降级轻防御不炸。
 | QueueUi.cs + queueui.page.js | webui 注入：入队按钮/队列胶囊/队列面板 |
 
 （各模块随任务落地时补细节节。）
