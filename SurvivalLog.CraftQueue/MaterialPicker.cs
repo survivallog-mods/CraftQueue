@@ -163,6 +163,9 @@ internal static class MaterialPicker
         return result;
     }
 
+    /// <summary>配方配置（Enqueue 建任务用；null=查无）。</summary>
+    public static Config_ProductionList ProductionCfg(int recipeId) => CM()?.Get_Config_ProductionList(recipeId);
+
     /// <summary>Task 5 前台拦截用：链上（背包+柜子+抽屉，刨除预占）某 configId 可用总数。</summary>
     public static int CountAvailExcludingReserved(int configId)
     {

@@ -51,6 +51,20 @@
 - interop 要点：`ItemData.InstanceId`（BaseEntity）为物品实例 id（跨包移动不变）；
   `GetItemDataList`/`TryQuickMoveItems` 收发 Il2CppSystem 列表。
 | QueueRunner.cs | 串行 runner：派发/完成收尾/落地/精力挂起/取消 |
+
+### QueueRunner 细节
+
+- 0.5s 节流轮询；串行状态机顺序：在制收尾 → 精力恢复 → Blocked 补料恢复 → 派发队首。
+- 派发：预占校验（`GetItemData(id).OwnerId==抽屉`，丢→Blocked）→ `ToolTableMap` 找
+  `State==Idle 且台面无遗留物` 的家具 → `StartProduction(furn, ids)`（void，拒绝靠下一轮
+  State 仍 Idle 判定，1s 窗口；`GetCraftStamina` 区分精力不足挂起 vs 校验失败 Blocked）。
+- 收尾：`GetToolTableState≥WaitingReceive` → 台面成品 `TryQuickMoveItems` 入抽屉 → 残留
+  `DropItemManager.DropItemFromBag` 逐件落地（家具包裹官方直送玄关、台面无物自然跳过）→
+  **直写 `ToolTableData.State=0`+清 CachedItemIds 复位**（官方复位在 notify 订阅方/UI 层，
+  队列侧等价复位；Il2CppInterop 私有成员可达）→ `Left--`，>0 重取料回 Queued。
+- 取消 Dispatched：`ForceEndProduction` + 直写复位；料留抽屉（预占解除）。
+- 只认自己派发的 `_busyFurnId`——官方/前台任务与读档恢复的 Making 不被队列收尾。
+- 已知简化（ledger）：抽屉容量 v1 固定 120（最小档保守）；`ItemData.InstanceId` 跨包不变。
 | CraftGate.cs | 前台制作拦截（Make/CraftAgain 双入口） |
 | QueueUi.cs + queueui.page.js | webui 注入：入队按钮/队列胶囊/队列面板 |
 

@@ -65,6 +65,6 @@ internal sealed class QueueTicker : MonoBehaviour
 
     public void Update()
     {
-        // Task 4/6 接入：QueueRunner.FastPoll(); QueueUi.FastPoll();
+        QueueRunner.FastPoll();
     }
 }
