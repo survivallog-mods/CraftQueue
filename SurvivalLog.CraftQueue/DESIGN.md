@@ -26,6 +26,15 @@
 |---|---|
 | CraftQueuePlugin.cs | 入口：cfg、Ticker 注册（AccessTicker 同款） |
 | QueueState.cs | 任务/预占集合数据模型 + 队列快照 JSON |
+
+### QueueState 细节
+
+- `CraftTask`：配方 × 数量逐件派发；`ReservedItemIds` 只记当前这件（下一件轮到时重取，避免一次占满抽屉）。
+- `QueueState.ReservedItemIds` = 全任务并集，`SyncReservedIds()` 重建；取料/拦截/派发校验三处统一用它。
+- 快照协议（`SnapshotJson()`，与原型 js 字段对齐）：
+  `{"stamina","staminaMax","paused","drawerUsed","drawerCap","tasks":[{id,name,icon,left,total,status,reason,furniture}]}`，
+  status ∈ queued/making/blocked/done（Dispatched→making）。手写拼接零依赖，中文原样、引号反斜杠转义。
+- 单测：`tests/QueueStateTests`（零依赖 console，`dotnet run`，非零退出码=失败）。
 | MaterialPicker.cs | 官方口径取料选择器（预占排除/变体拒绝/搬抽屉） |
 | QueueRunner.cs | 串行 runner：派发/完成收尾/落地/精力挂起/取消 |
 | CraftGate.cs | 前台制作拦截（Make/CraftAgain 双入口） |
