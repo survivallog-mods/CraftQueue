@@ -25,6 +25,7 @@ internal static class QueueRunner
 {
     private static float _nextPoll;
     private static float _drawerCountAt = -999f;
+    private static float _lastPauseProbe = -999f;
     private static float _resumeAt;                          // 完成→下一件派发的错峰时刻
     private static Dictionary<long, long> _preProductIds;    // 派发前成品 id 快照（完成 diff 用）
     private static long _busyFurnId;          // 当前派发到的家具（0=无在制）
@@ -49,12 +50,28 @@ internal static class QueueRunner
         try { return WorkbenchDrawerConfig.DrawerOwnerId; } catch { return 0; }
     }
 
-    /// <summary>帧入口（QueueTicker.Update 每帧调，内部 0.5s 节流）。</summary>
+    private static float _lastQueueActivityAt = -999f;    // 队列最近活动（派发/完成）——同帧抵消的作用域
+    private static BattleLogicWorld _worldRef;            // 世界重绑检测（读档/切档清队列）
+    /// <summary>
+    /// 同帧抵消官方完成冻结（终案）：TryCreateItem 完成时内部调 BLW.OnPause() 冻结世界（前台
+    /// 「弹窗等收下」语义，xref 0x28CFCFC 实证）——队列台完成不该冻玩家。官方 Update 链先跑、
+    /// 本 Ticker 同帧后跑：满足条件即在下一帧渲染前调官方 OnResume()（完整恢复路径），暂停
+    /// 从未存活到可感知。判定与弹窗拦截同款：仅「暂停栈含 ToolTableManager + 队列活跃窗口 +
+    /// 当前台非玩家前台事件（非 Making/WaitingReceive）」——玩家前台完成冻结（官方预期）、
+    /// 愿望/结算冻结（WishManager/GameOver 同名调用）一概不碰。
+    /// </summary>
+    /// <summary>帧入口（QueueTicker.Update 每帧调：同帧抵消 + 帧级完成检测 + 0.5s 节流轮询）。</summary>
     internal static void FastPoll()
     {
+        NeutralizePauseTick();                              // 同帧抵消官方完成冻结（每帧，先于一切）
         // 帧级快通道：在制任务完成检测（完成帧立即收尾，不等 0.5s 门闩）
         if (_busyFurnId != 0)
         {
+            if (UnityEngine.Time.unscaledTime - _lastPauseProbe > 2f)
+            {
+                _lastPauseProbe = UnityEngine.Time.unscaledTime;
+                try { CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner][探针2] 制作中：IsPause={World()?.IsPause} timeScale={UnityEngine.Time.timeScale}"); } catch { }
+            }
             try
             {
                 var busy = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Dispatched);
@@ -63,7 +80,6 @@ internal static class QueueRunner
                     var st = TTM().GetToolTableState(_busyFurnId);
                     if (st != HandMadeState.Making && st != HandMadeState.Idle)
                     {
-                        // 完成：立即收尾（不等 0.5s 门闩）+ 帧率探针（完成帧耗时归因）
                         var sw0 = System.Diagnostics.Stopwatch.StartNew();
                         Poll();
                         sw0.Stop();
@@ -80,7 +96,27 @@ internal static class QueueRunner
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 轮询异常: " + e.Message); }
     }
 
-    private static BattleLogicWorld _worldRef;          // 世界重绑检测（终审 I7：读档/切档清队列）
+    private static void NeutralizePauseTick()
+    {
+        try
+        {
+            var w = World();
+            if (w == null || !w.IsPause) return;
+            if (UnityEngine.Time.unscaledTime - _lastQueueActivityAt > 2f) return;   // 队列不活跃不碰
+            var stack = w._lastPauseStack;
+            if (stack == null || !stack.Contains("ToolTableManager")) return;        // 只认制作完成源
+            var st = QueueUi.ToolTableStatePublic();
+            var furn = st?.CurrentFurnitureId ?? 0;
+            var cur = HandMadeState.Idle;
+            if (furn != 0 && w._ToolTableManager != null)
+                cur = w._ToolTableManager.GetToolTableState(furn);
+            if (cur == HandMadeState.Making || cur == HandMadeState.WaitingReceive) return;  // 玩家前台事件
+            w.OnResume();
+            if (CraftQueuePlugin.CfgVerbose.Value)
+                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Runner] 官方完成冻结已同帧抵消");
+        }
+        catch { }
+    }
 
     private static void Poll()
     {
@@ -313,6 +349,7 @@ internal static class QueueRunner
         ttm.StartProduction(furn, ToIl2Cpp(t.ReservedItemIds));
         _busyFurnId = furn;
         _dispatchTick = 0;
+        _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _preProductIds = t.ProductIconId > 0 && !t.IsFurniture ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：完成后 diff（官方同款模式）
         t.Status = TaskStatus.Dispatched;
         if (CraftQueuePlugin.CfgVerbose.Value)
@@ -413,6 +450,10 @@ internal static class QueueRunner
 
         // WaitingReceive：正常完成收尾；NoReceive：产出接收异常（语义未实证）——照搬台面物品但任务挂起（终审 I13）
         // 计时日志：完成卡顿定位（>300ms 的段直接入日志）
+        // 回滚 IsPause 直写（实机证伪：直接改标志毁掉官方恢复触发条件→输入锁残留一直卡死）。
+        // 定案：官方把队列台完成当前台弹窗——UI 暂停计数 +1 等「收下」释放；推送层弹窗拦截让玩家
+        // 永远收不了→暂停挂到官方超时（间断卡根因）。正解=成品入抽屉+复位后 mod 代发官方
+        // 「收下」action（ResultConfirm 走官方完整释放路径，不直写标志）。
         var sw = System.Diagnostics.Stopwatch.StartNew();
         ResetFurnState(_busyFurnId);
         if (sw.ElapsedMilliseconds > 300) CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 收尾耗时 复位={sw.ElapsedMilliseconds}ms");
@@ -420,6 +461,9 @@ internal static class QueueRunner
         try { CollectProducts(t, _busyFurnId); }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收尾异常: " + e.Message); }
         if (swp.ElapsedMilliseconds > 300) CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 收尾耗时 成品搬运={swp.ElapsedMilliseconds}ms");
+        try { GameCore.HotUpdate.ReduxUI.Ac_ToolTable_ResultConfirm.SendAction(); }
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 代发收下异常: " + e.Message); }
+        _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _busyFurnId = 0;
 
         t.ReservedItemIds.Clear();
