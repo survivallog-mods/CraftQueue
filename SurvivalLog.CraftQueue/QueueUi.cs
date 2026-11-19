@@ -236,11 +236,22 @@ internal static class QueueUi
             var ttm = world?._ToolTableManager;
             if (ttm == null) return;
             var cur = ttm.GetToolTableState(st.CurrentFurnitureId);
-            if (cur == GameCore.HotUpdate.HandMadeState.Making || cur == GameCore.HotUpdate.HandMadeState.WaitingReceive)
+            // 玩家前台事件保护：Making/WaitingReceive/NoReceive 全态（审查补：NoReceive=玩家
+            // 自己的失败弹窗，缺保护会被误吞——既有缺口随本次一并收口）
+            if (cur == GameCore.HotUpdate.HandMadeState.Making || cur == GameCore.HotUpdate.HandMadeState.WaitingReceive
+                || cur == GameCore.HotUpdate.HandMadeState.NoReceive)
                 return;
             // 队列台事件：同帧掐断
             st.IsCrafting.Value = false;
             st.ResultShow.Value = false;
+            // HandMadeState 同帧写回 Idle（2026-11-19 取证）：官方 RA_CheckResult（开工）/
+            // RA_Result（完成）均无视 FurnitureId 直写全局单例 state.HandMadeState（0x2D327E4
+            // 写 1 / 0x2D38F77 写 action.State）——队列台一动就污染前台台状态；RA_RecipeClick
+            // 与 RA_Make 入口都检查 HandMadeState!=Idle 直接拒（0x2D381DE / 0x2D35EFC，连提示
+            // 都没有）=「制作中点配方取料/开始制作无响应」。两处污染写都在 IsCrafting/ResultShow
+            // RP 写 true（同步触发本回调）之前 → 写回必为终值；同帧稍后 webui flush 序列化时
+            // 值已是 Idle。
+            st.HandMadeState = GameCore.HotUpdate.HandMadeState.Idle;
             if (CraftQueuePlugin.CfgVerbose.Value)
                 CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] 队列弹窗已在推送层掐断");
         }
