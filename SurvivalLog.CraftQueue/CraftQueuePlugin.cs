@@ -7,6 +7,8 @@ using Il2CppInterop.Runtime.Injection;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("QueueStateTests")]
+
 namespace SurvivalLog.CraftQueue;
 
 /// <summary>

@@ -66,103 +66,148 @@ internal static class MaterialPicker
     }
 
     /// <summary>
-    /// 为一件任务选料并预占：选背包→柜子→抽屉(未预占)中该配方的全部材料，搬进抽屉，
-    /// 登记进 QueueState.ReservedItemIds（经调用方任务对象）。返回物品 id 列表（空=失败）。
+    /// 为任务选料并预占（2026-11-19 全量升级，用户实测定案：入队 qty 份=锁 qty 份料）：
+    /// 选背包→柜子→抽屉(未预占)中该配方 ×qty 份的全部材料，**按份分组**（终审 P1 修复：贪心
+    /// 凑份与总量可满足不等价——混合粒度堆时总量够但单份凑不出），搬进抽屉。
+    /// 返回 List[qty]（每组=一份的实例 id 集）；空=失败（fail 说明原因）。
+    /// 实例粒度不变量（C3，2026-11-20 定案）：官方消耗按整实例销毁——预占实例 cnt≤单件该
+    /// configId 需求；大堆不选（SplitItem 实为 UseTimes 拆分对可堆叠材料恒失败、AddItem 恒
+    /// 并堆——自动拆堆无安全官方 API，大堆 Partial 引导玩家手动拆）。
     /// </summary>
-    public static List<long> PickAndReserve(Il2CppSystem.Collections.Generic.List<int> materialIds, out PickFail fail)
+    public static List<List<long>> PickAndReserveGrouped(Il2CppSystem.Collections.Generic.List<int> materialIds, int qty, out PickFail fail)
     {
         fail = PickFail.None;
-        var result = new List<long>();
+        var groups = new List<List<long>>();
         var im = IM();
         var drawerOwner = DrawerOwner();
         if (materialIds == null || materialIds.Count == 0)
         {
             fail = PickFail.NoRecipe;
-            return result;
+            return groups;
         }
         // 染料变体：v1 直接拒绝（spec §7.5，材料实例不唯一确定）
         for (int mi = 0; mi < materialIds.Count; mi++)
         {
             bool isDye = false;
             try { isDye = DyeConfig.IsDyeMaterial(materialIds[mi]); } catch { }
-            if (isDye) { fail = PickFail.Variant; return result; }
+            if (isDye) { fail = PickFail.Variant; return groups; }
         }
 
-        // 需求计数（重复出现=数量）
-        var need = new Dictionary<int, int>();
+        // 单份需求（重复出现=数量）
+        var unit = new Dictionary<int, int>();
         for (int mi = 0; mi < materialIds.Count; mi++)
         {
-            need.TryGetValue(materialIds[mi], out var n);
-            need[materialIds[mi]] = n + 1;
+            unit.TryGetValue(materialIds[mi], out var u);
+            unit[materialIds[mi]] = u + 1;
         }
 
-        // 抽屉容量（近似口径：剩余格 ≥ 材料种类数）
+        // 抽屉容量（近似口径：剩余格 ≥ 单份种类数——分组占格≥扁平，抽屉满由搬运核验兜底）
         var drawerItems = im.GetItemDataList(drawerOwner);
         int drawerUsed = drawerItems?.Count ?? 0;
-        int drawerCap = QueueState.DrawerCap;
-        if (drawerCap - drawerUsed < need.Count)
+        if (QueueState.DrawerCap - drawerUsed < unit.Count)
         {
             QueueState.DrawerUsed = drawerUsed;
             fail = PickFail.DrawerFull;
-            return result;
+            return groups;
         }
 
-        // 逐 owner 选料（顺序：背包 → 柜子 → 抽屉；抽屉候选剔除已预占）
-        var pickedBySrc = new Dictionary<long, List<long>>();
-        var remaining = new Dictionary<int, int>(need);
+        // 候选池（顺序：背包 → 柜子 → 抽屉未预占；单件粒度过滤）
+        var pool = new List<(long id, int cid, int cnt, long owner)>();
         bool overStackOnly = false;
         foreach (var owner in CollectOwners())
         {
-            if (remaining.Count == 0) break;
             Il2CppSystem.Collections.Generic.List<ItemData> items = null;
             try { items = im.GetItemDataList(owner); } catch { }
             if (items == null) continue;
-            // 该 owner 内按需挑选：同 configId 的物品按堆叠数扣减，跨物品累计
             foreach (var it in items)
             {
-                if (remaining.Count == 0) break;
                 long iid; int cid, cnt;
                 try { iid = it.InstanceId; cid = it.ItemConfigId; cnt = it.ItemCount; } catch { continue; }
-                if (!remaining.TryGetValue(cid, out var left) || left <= 0) continue;
+                if (!unit.ContainsKey(cid) || cnt <= 0) continue;
                 bool reserved = QueueState.ReservedItemIds.Contains(iid);
-                if (owner == drawerOwner && reserved) continue; // 抽屉只剔预占；其他源物品不可能预占（预占只在抽屉）
-                // 终审 C3：官方 ForceRemoveItem 按整件消耗——堆叠数超过剩余需求的实例不可整件预占
-                //（否则多余部分被销毁）。只选 cnt <= left 的实例；全超则 Partial（提示整理/拆堆）。
-                if (cnt > left) { overStackOnly = true; continue; }
-                remaining[cid] = left - cnt;
-                if (remaining[cid] <= 0) remaining.Remove(cid);
-                if (!pickedBySrc.TryGetValue(owner, out var list))
-                    pickedBySrc[owner] = list = new List<long>();
-                list.Add(iid);
+                if (owner == drawerOwner && reserved) continue; // 抽屉只剔预占；其他源不可能预占（预占只在抽屉）
+                if (cnt > unit[cid]) { overStackOnly = true; continue; }   // 单件粒度不变量：大堆不选
+                pool.Add((iid, cid, cnt, owner));
             }
-        }
-        if (remaining.Count > 0)
-        {
-            fail = overStackOnly ? PickFail.Partial : PickFail.Shortage;
-            return result;
         }
 
-        // 搬运进抽屉并核验数量（同 owner=抽屉的不搬）
+        // 按份分组（纯函数，组内 cnt≤left 上界防超取销毁放大——终审三轮 P1-1/P1-2）
+        var sets = GroupSets(pool.ConvertAll(c => (c.id, c.cid, c.cnt)), unit, qty);
+        if (sets == null)
+        {
+            // 凑不齐：曾有大堆被粒度过滤=Partial（引导拆堆），否则 Shortage
+            fail = overStackOnly ? PickFail.Partial : PickFail.Shortage;
+            return new List<List<long>>();
+        }
+        groups = sets;
+        var pickedBySrc = new Dictionary<long, List<long>>();
+        foreach (var g in groups)
+            foreach (var id in g)
+            {
+                long owner = 0;
+                foreach (var c in pool)
+                    if (c.id == id) { owner = c.owner; break; }
+                if (!pickedBySrc.TryGetValue(owner, out var list))
+                    pickedBySrc[owner] = list = new List<long>();
+                list.Add(id);
+            }
+
+        // 搬运进抽屉并核验数量（同 owner=抽屉的不搬）；不完整=已搬的留给玩家，本轮失败
         foreach (var kv in pickedBySrc)
         {
-            if (kv.Key == drawerOwner)
-            {
-                result.AddRange(kv.Value);
-                continue;
-            }
+            if (kv.Key == drawerOwner) continue;
             int moved = 0;
             try { moved = im.TryQuickMoveItems(ToIl2CppList(kv.Value), kv.Key, drawerOwner, true); } catch { }
             if (moved != kv.Value.Count)
             {
-                // 搬运不完整（抽屉半路满等）：把已搬进抽屉的这批留给玩家（不预占），本轮失败
                 CraftQueuePlugin.Log.LogWarning(
-                    $"[CraftQueue.Picker] 搬运不完整 owner=0x{kv.Key:X} 选={kv.Value.Count} 搬={moved}，放弃本次取料");
+                    $"[CraftQueue.Picker] 搬运不完整 owner=0x{kv.Key:X} 选={kv.Value.Count} 搬={moved}（已入抽屉的散料留给玩家），放弃本次取料");
                 fail = PickFail.DrawerFull;
-                return new List<long>();
+                return new List<List<long>>();
             }
-            result.AddRange(kv.Value);
         }
-        return result;
+        return groups;
+    }
+
+    /// <summary>扁平包装（探测/SelfTest 用）：分组结果拍平。</summary>
+    public static List<long> PickAndReserve(Il2CppSystem.Collections.Generic.List<int> materialIds, int qty, out PickFail fail)
+    {
+        var flat = new List<long>();
+        foreach (var g in PickAndReserveGrouped(materialIds, qty, out fail))
+            flat.AddRange(g);
+        return flat;
+    }
+
+    /// <summary>
+    /// 分组核心（纯函数，可单测）：共享候选池逐份扣减——每份每 configId 取实例凑满 unit，
+    /// 组内只取 cnt≤left 的实例（上界防超取：官方按整实例销毁，超取=多余部分被销毁）；
+    /// 池内已用实例标记 cnt=0。凑不齐任一份返回 null（零副作用——调用方判定 Partial/Shortage）。
+    /// </summary>
+    internal static List<List<long>> GroupSets(List<(long id, int cid, int cnt)> pool, Dictionary<int, int> unit, int qty)
+    {
+        var groups = new List<List<long>>();
+        for (int j = 0; j < qty; j++)
+        {
+            var grp = new List<long>();
+            var remaining = new Dictionary<int, int>(unit);
+            bool short_ = false;
+            foreach (var cid in unit.Keys)
+            {
+                int left = remaining[cid];
+                for (int p = 0; p < pool.Count && left > 0; p++)
+                {
+                    if (pool[p].cnt <= 0 || pool[p].cnt > left || pool[p].cid != cid) continue;
+                    grp.Add(pool[p].id);
+                    left -= pool[p].cnt;
+                    pool[p] = (pool[p].id, pool[p].cid, 0);
+                }
+                remaining[cid] = left;
+                if (left > 0) { short_ = true; break; }
+            }
+            if (short_) return null;
+            groups.Add(grp);
+        }
+        return groups;
     }
 
     /// <summary>配方配置（Enqueue 建任务用；null=查无）。</summary>

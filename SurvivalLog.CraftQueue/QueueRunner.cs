@@ -240,7 +240,7 @@ internal static class QueueRunner
 
         // 路径 B（key 直取）：台面无料或台面料不构成所选配方 → 按配方表全链取料
         Config_ProductionList cfg = null;
-        List<long> firstIds = null;
+        List<List<long>> groups = null;
         var benchIds = new List<long>();
         var matIds = new Il2CppSystem.Collections.Generic.List<int>();
         if (bench != null)
@@ -273,15 +273,16 @@ internal static class QueueRunner
             }
             cfg = MaterialPicker.ProductionCfg(keyRecipeId);
             if (cfg?.MaterialList == null) { failMsg = "配方不可用"; return false; }
-            firstIds = MaterialPicker.PickAndReserve(cfg.MaterialList, out var pf);
-            if (firstIds.Count == 0)
+            // 全量直取：qty 份一次锁进抽屉（按份分组——终审 P1）
+            groups = MaterialPicker.PickAndReserveGrouped(cfg.MaterialList, qty, out var pf);
+            if (groups.Count == 0)
             {
                 failMsg = pf switch
                 {
-                    PickFail.Shortage => "材料不足（背包/柜子/抽屉）",
+                    PickFail.Shortage => $"材料不足（需 {qty} 份，背包/柜子/抽屉凑不齐）",
                     PickFail.DrawerFull => "工作台抽屉放不下材料",
                     PickFail.Variant => "含染料变体的配方暂不支持队列",
-                    PickFail.Partial => "材料堆叠超过需求，请先整理",
+                    PickFail.Partial => "部分材料是超过单件用量的大堆，请先拆堆（shift 拖出一半）再入队",
                     _ => "取料失败",
                 };
                 return false;
@@ -289,11 +290,35 @@ internal static class QueueRunner
         }
         else
         {
-            // 路径 A（台面现料）：搬进抽屉=第一件预占；搬运不完整=抽屉满，放弃
+            // 路径 A（台面现料一份 + 链上补足 qty-1 份，全量预占）：先补后搬——补料失败零副作用
+            if (qty > 1)
+            {
+                var extra = MaterialPicker.PickAndReserveGrouped(cfg.MaterialList, qty - 1, out var pf);
+                if (extra.Count == 0)
+                {
+                    failMsg = pf switch
+                    {
+                        PickFail.Shortage => $"材料不足（需 {qty} 份，台面 1 份+背包/柜子/抽屉凑不齐）",
+                        PickFail.DrawerFull => "工作台抽屉放不下材料",
+                        PickFail.Variant => "含染料变体的配方暂不支持队列",
+                        PickFail.Partial => "部分材料是超过单件用量的大堆，请先拆堆（shift 拖出一半）再入队",
+                        _ => "取料失败",
+                    };
+                    return false;
+                }
+                groups = extra;
+            }
+            else groups = new List<List<long>>();
+            // 台面这一份最后搬进抽屉（搬运不完整=抽屉满：链上已搬的留在抽屉不预占，本轮失败）
             int moved = 0;
             try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchOwner, drawerOwner, true); } catch { }
-            if (moved != benchIds.Count) { failMsg = "工作台抽屉放不下材料"; return false; }
-            firstIds = benchIds;
+            if (moved != benchIds.Count)
+            {
+                failMsg = "工作台抽屉放不下材料";
+                CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 台面搬运不完整（选 {benchIds.Count} 搬 {moved}），链上已入抽屉的留给玩家");
+                return false;
+            }
+            groups.Add(benchIds);   // 台面这份=独立一组（粒度由官方摆料保证）
         }
 
         string name = ""; int icon = 0; bool isFurn = false;
@@ -324,11 +349,12 @@ internal static class QueueRunner
             IsFurniture = isFurn,
             Status = TaskStatus.Queued,
         };
-        t.ReservedItemIds.AddRange(firstIds);
+        t.ReserveGroups.AddRange(groups);
+        foreach (var g in groups) t.ReservedItemIds.AddRange(g);
         QueueState.Add(t);
         QueueState.SyncReservedIds();
         if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（预占 {firstIds.Count} 件已锁抽屉）");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（全量预占 {t.ReservedItemIds.Count} 件/{groups.Count} 份已锁抽屉）");
         return true;
     }
 
@@ -386,23 +412,36 @@ internal static class QueueRunner
             t.Status = TaskStatus.Blocked;
             t.BlockedReason = "预占材料被取走";
             t.ReservedItemIds.Clear();            // 预占已废（料不在抽屉）
+            t.ReserveGroups.Clear();
             QueueState.SyncReservedIds();
             if (CraftQueuePlugin.CfgVerbose.Value)
                 CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 预占物品丢失 → Blocked");
             return;
         }
+        // 本件一份=组[0]（入队时按份分组选料，终审 P1：分组保证每份可整件消耗——官方按整实例销毁）
+        if (t.ReserveGroups.Count == 0 || t.ReserveGroups[0].Count == 0)
+        {
+            t.Status = TaskStatus.Blocked;
+            t.BlockedReason = "预占材料异常（分组为空）";
+            CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] #{t.TaskId} 预占分组为空（预占 {t.ReservedItemIds.Count} 件）");
+            return;
+        }
+        var one = t.ReserveGroups[0];
         var furn = FindIdleTable();
         if (furn == 0) return;                    // 无合格台（调用方转 Blocked）
         var ttm = TTM();
-        ttm.StartProduction(furn, ToIl2Cpp(t.ReservedItemIds));
+        ttm.StartProduction(furn, ToIl2Cpp(one));
+        t.CurrentIds.Clear();
+        t.CurrentIds.AddRange(one);
         _busyFurnId = furn;
         _dispatchTick = 0;
         _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _preProductIds = t.ProductIconId > 0 && !t.IsFurniture ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：完成后 diff（官方同款模式）
         t.Status = TaskStatus.Dispatched;
         if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId} → 家具 0x{furn:X}");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId}（本件 {one.Count} 件，剩余预占 {t.ReservedItemIds.Count}）→ 家具 0x{furn:X}");
     }
+
 
     /// <summary>
     /// 两级筛选（审查定案）：ToolTableMap 含全部家具（RegisterToolTable 无类型筛选，反汇编实证）——
@@ -514,7 +553,14 @@ internal static class QueueRunner
         _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _busyFurnId = 0;
 
-        t.ReservedItemIds.Clear();
+        t.Left--;
+        QueueState.JustFinishedTaskId = t.TaskId;
+        QueueState.JustDoneAt = UnityEngine.Time.unscaledTime;   // 弹窗拦截 3s 窗 + 面板刷新
+        _resumeAt = UnityEngine.Time.unscaledTime + 3f;      // 错峰 3s：官方完成链（统计/notify/归置）主线程卡顿的来源，拉开间隔
+        // 全量预占：只移除本件已消耗的分组（组[0]=CurrentIds），剩余份数原地保留（2026-11-19 升级）
+        if (t.ReserveGroups.Count > 0) t.ReserveGroups.RemoveAt(0);
+        foreach (var id in t.CurrentIds) t.ReservedItemIds.Remove(id);
+        t.CurrentIds.Clear();
         QueueState.SyncReservedIds();
         bool bad = state == HandMadeState.NoReceive;
         if (bad)
@@ -524,10 +570,6 @@ internal static class QueueRunner
             _busyFurnId = 0;
             return;
         }
-        t.Left--;
-        QueueState.JustFinishedTaskId = t.TaskId;
-        QueueState.JustDoneAt = UnityEngine.Time.unscaledTime;   // 弹窗拦截 3s 窗 + 面板刷新
-        _resumeAt = UnityEngine.Time.unscaledTime + 3f;      // 错峰 3s：官方完成链（统计/notify/归置）主线程卡顿的来源，拉开间隔
         if (t.Left <= 0)
         {
             t.Status = TaskStatus.Done;
@@ -536,18 +578,7 @@ internal static class QueueRunner
         }
         else
         {
-            var ids = MaterialPicker.PickAndReserve(MatsOf(t), out var fail);
-            if (fail == PickFail.None && ids.Count > 0)
-            {
-                t.ReservedItemIds.AddRange(ids);
-                QueueState.SyncReservedIds();
-                t.Status = TaskStatus.Queued;
-            }
-            else
-            {
-                t.Status = TaskStatus.Blocked;
-                t.BlockedReason = fail == PickFail.Variant ? "含染料变体" : "材料不足";
-            }
+            t.Status = TaskStatus.Queued;                 // 剩余预占已就位，直接续排
         }
     }
 
@@ -669,14 +700,43 @@ internal static class QueueRunner
 
     private static bool TryRecoverBlocked(CraftTask t)
     {
+        // 「启动制作被拒」=持续性校验失败（材料/配方类），重试必然再拒——0.5s 翻转循环
+        //（终审 P1-2）；挂起等玩家补料/取消，不走恢复
+        if (t.BlockedReason.Contains("被拒")) return false;
+        // Left=0（最后一件 NoReceive 型 Blocked）无件可做——恢复只会与「分组为空」判定互翻
+        //（四审变体）；静止挂起，玩家取消即清
+        if (t.Left <= 0) return false;
+        // 优先验证预占是否完好（料仍在抽屉）：完好直接续排（NoReceive 型 Blocked 料没丢——
+        // 重取反而制造幽灵预占+翻转循环，终审 P2）；真丢才清掉按剩余份数重取
+        var im = IM();
+        var drawerOwner = DrawerOwner();
+        bool intact = t.ReserveGroups.Count >= t.Left;
+        if (intact)
+        {
+            foreach (var id in t.ReservedItemIds)
+            {
+                var it = im?.GetItemData(id);
+                if (it == null || it.OwnerId != drawerOwner) { intact = false; break; }
+            }
+        }
+        if (intact)
+        {
+            t.BlockedReason = "";
+            t.Status = TaskStatus.Queued;
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 预占完好，恢复排队");
+            return true;
+        }
         t.ReservedItemIds.Clear();
-        var ids = MaterialPicker.PickAndReserve(MatsOf(t), out var fail);
-        if (fail != PickFail.None || ids.Count == 0) return false;
-        t.ReservedItemIds.AddRange(ids);
+        t.ReserveGroups.Clear();
+        QueueState.SyncReservedIds();          // 先解除全局预占（终审 P2-1：防幽灵剔除致永久 Shortage）
+        var groups = MaterialPicker.PickAndReserveGrouped(MatsOf(t), Math.Max(1, t.Left), out var fail);   // 全量口径：剩余份数
+        if (fail != PickFail.None || groups.Count == 0) return false;
+        foreach (var g in groups) t.ReserveGroups.Add(g);
+        foreach (var g in groups) t.ReservedItemIds.AddRange(g);
         t.BlockedReason = "";
         t.Status = TaskStatus.Queued;
         QueueState.SyncReservedIds();
-        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 补料恢复排队");
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 补料恢复排队（重取 {groups.Count} 份）");
         return true;
     }
 

@@ -69,9 +69,9 @@ internal static class SelfTest
                 }
                 if (!ok) continue;
                 try { if (ToolTableManager.IsFurniturePackageItem(cfg.ProductID[0])) continue; } catch { }
-                // 堆叠整件约束：需求 ≤ 实例堆数才行（PickFail.Partial 口径）——先按 PickAndReserve 实测
-                var ids = MaterialPicker.PickAndReserve(cfg.MaterialList, out var fail);
-                if (fail != PickFail.None || ids.Count == 0)
+                // 堆叠整件约束：需求 ≤ 实例堆数才行（PickFail.Partial 口径）——按分组实测 ×2（Left=2 同口径）
+                var groups = MaterialPicker.PickAndReserveGrouped(cfg.MaterialList, 2, out var fail);
+                if (fail != PickFail.None || groups.Count == 0)
                 {
                     CraftQueuePlugin.Log.LogWarning($"[SelfTest] 候选配方 #{kv.Key} 材料满足但取料失败 fail={fail}（换下一个）");
                     QueueState.ReservedItemIds.Clear();
@@ -86,10 +86,11 @@ internal static class SelfTest
                     Left = 2, Total = 2,
                     Status = TaskStatus.Queued,
                 };
-                t.ReservedItemIds.AddRange(ids);
+                t.ReserveGroups.AddRange(groups);
+                foreach (var g in groups) t.ReservedItemIds.AddRange(g);
                 QueueState.Add(t);
                 QueueState.SyncReservedIds();
-                CraftQueuePlugin.Log.LogWarning($"[SelfTest] 入队成功：配方 #{kv.Key} 成品 #{_productId} ×2（预占 {ids.Count} 件）——观察 90s");
+                CraftQueuePlugin.Log.LogWarning($"[SelfTest] 入队成功：配方 #{kv.Key} 成品 #{_productId} ×2（全量预占 {t.ReservedItemIds.Count} 件/{groups.Count} 份）——观察 90s");
                 TraceLoop(90f);
                 return;
             }

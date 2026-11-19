@@ -21,7 +21,9 @@ public sealed class CraftTask
     public int ProductIconId;
     public int Left;                       // 剩余件数
     public int Total;                      // 总件数
-    public readonly List<long> ReservedItemIds = new();   // 当前这件已预占的材料物品 id（在抽屉）
+    public readonly List<long> ReservedItemIds = new();   // 全任务（qty 份）已预占的材料物品 id 扁平并集（在抽屉）
+    public readonly List<List<long>> ReserveGroups = new(); // 按份分组（组[0]=下一件；派发/完成按组流转——终审 P1）
+    public readonly List<long> CurrentIds = new();        // 当前派发件的预占 id 子集（=消耗时移除的组）
     public TaskStatus Status = TaskStatus.Queued;
     public string BlockedReason = "";
     public bool IsFurniture;               // 家具包裹成品走官方原路送玄关（spec §4）

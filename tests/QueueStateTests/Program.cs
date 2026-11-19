@@ -66,6 +66,33 @@ internal static class Program
         var j2 = QueueState.SnapshotJson();
         Check("ProductName 引号反斜杠转义", j2.Contains("\"name\":\"a\\\"b\\\\c\""), j2);
 
+        // ── 分组算法 GroupSets（三轮审查反例全覆盖）──
+        System.Collections.Generic.Dictionary<int, int> U(params (int cid, int n)[] kv)
+        {
+            var d = new System.Collections.Generic.Dictionary<int, int>();
+            foreach (var (cid, n) in kv) d[cid] = n;
+            return d;
+        }
+        System.Collections.Generic.List<(long, int, int)> P(params (long id, int cid, int cnt)[] items) => new(items);
+        // ① 恰好整份：[3,3]×qty2 unit3 → 两组各 [3]
+        var r1 = MaterialPicker.GroupSets(P((1, 10, 3), (2, 10, 3)), U((10, 3)), 2);
+        Check("分组:整份堆恰好两组", r1 != null && r1.Count == 2 && r1[0].Count == 1 && r1[0][0] == 1 && r1[1][0] == 2);
+        // ② 组内多实例凑份（终审 P1-1 顺序无关）：[2,2,1,1]×qty2 unit3 → 份 [2,1] [2,1]
+        var r2 = MaterialPicker.GroupSets(P((1, 10, 2), (2, 10, 2), (3, 10, 1), (4, 10, 1)), U((10, 3)), 2);
+        Check("分组:混合粒度凑份顺序无关", r2 != null && r2.Count == 2 && r2[0].Count == 2 && r2[1].Count == 2, r2 == null ? "null" : $"{r2.Count}组");
+        // ③ 超取上界（P1-1）：[2,2,2]×qty1 unit3 → null（不再 2+2=4 超取销毁）
+        var r3 = MaterialPicker.GroupSets(P((1, 10, 2), (2, 10, 2), (3, 10, 2)), U((10, 3)), 1);
+        Check("分组:组内cnt上界防超取", r3 == null);
+        // ④ 总量够但分组不可分（审查反例）：[2,2,2]×qty2 unit3 → null
+        var r4 = MaterialPicker.GroupSets(P((1, 10, 2), (2, 10, 2), (3, 10, 2)), U((10, 3)), 2);
+        Check("分组:总量够但不可分=诚实null", r4 == null);
+        // ⑤ 多 configId：木3+石2 ×qty2 → 每组含两种
+        var r5 = MaterialPicker.GroupSets(P((1, 10, 3), (2, 11, 2), (3, 10, 3), (4, 11, 2)), U((10, 3), (11, 2)), 2);
+        Check("分组:多材料组合", r5 != null && r5.Count == 2 && r5[0].Contains(1) && r5[0].Contains(2) && r5[1].Contains(3) && r5[1].Contains(4));
+        // ⑥ 池不足：[3]×qty2 unit3 → null
+        var r6 = MaterialPicker.GroupSets(P((1, 10, 3)), U((10, 3)), 2);
+        Check("分组:池不足null", r6 == null);
+
         Console.WriteLine(_fails == 0 ? "ALL GREEN" : $"{_fails} FAILED");
         Environment.Exit(_fails == 0 ? 0 : 1);
     }
