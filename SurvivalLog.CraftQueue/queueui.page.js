@@ -202,61 +202,20 @@
     function winOf(doc) { try { return doc.defaultView; } catch (e) { return null; } }
     function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
 
-    // 前台保护窗：玩家自己点官方「制造」（CRAFT 无标记）后 4s 内不压制官方反馈
-    var frontGuardUntil = 0;
-    function hookFrontGuard(win) {
-        try {
-            if (!win || !win.core || !win.core.UnitySendEvent) return;
-            var orig = win.core.UnitySendEvent;
-            if (orig.__cqfg) return;
-            var w = function (type, payload) {
-                try { if (type === 'CRAFT' && !(payload && (payload.cqEnqueue || payload.cqCancel))) frontGuardUntil = Date.now() + 4000; } catch (e) { }
-                return orig.call(win.core, type, payload);
-            };
-            w.__cqfg = 1;
-            win.core.UnitySendEvent = w;
-        } catch (e) { }
-    }
-
     // 250ms 自愈轮询：①重开界面主动补挂（终审 I11）②making 进度本地推进（I12）
     // ③官方成品弹窗只在 justFinished 标志时自动收（I4/I5：不与 runner 收尾赛跑、不抢官方前台弹窗）
     setInterval(function () {
         var f = findToolTable();
         if (!f) return;
-        hookFrontGuard(f.win);
-        // 队列在制 && 非前台保护窗：CSS 级压制官方制作遮罩/成品弹窗（零延迟，根治闪烁）
-        try {
-            var qbusy = CQ.data && CQ.data.tasks && CQ.data.tasks.some(function (t) { return t.status === 'making'; });
-            var doc2 = f.doc;
-            var stEl = doc2.getElementById('cq-force-style');
-            if (qbusy && Date.now() > frontGuardUntil && !stEl) {
-                stEl = doc2.createElement('style'); stEl.id = 'cq-force-style';
-                stEl.textContent = '#crafting-overlay{display:none!important}';
-                doc2.head.appendChild(stEl);
-            } else if ((!qbusy || Date.now() < frontGuardUntil) && stEl) {
-                stEl.remove();
-            }
-        } catch (e) { }
-        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); hookSend(f.win); render(f.doc); return; }
-        var d = CQ.data;
-        if (!d) return;
-        // making 进度推进（C# 只推结构签名）
-        var list = f.doc.getElementById('cq-list');
-        if (list && d.tasks) {
-            for (var i = 0; i < d.tasks.length; i++) {
-                var t = d.tasks[i];
+        // 界面重开补挂（iframe 重建后 setData 未到也要有按钮/面板——审查修2）+ making 进度本地推进
+        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); render(f.doc); return; }
+        if (CQ.data && CQ.data.tasks) {
+            var list = f.doc.getElementById('cq-list');
+            if (list) for (var i = 0; i < CQ.data.tasks.length; i++) {
+                var t = CQ.data.tasks[i];
                 if (t.status !== 'making') continue;
                 var el = list.querySelector('.cq-task[data-id="' + t.id + '"] .cq-bar i');
-                if (el) { var w = Math.min(100, (parseFloat(el.style.width) || 0) + 2); el.style.width = w + '%'; }
-            }
-        }
-        // justFinished：该弹窗属于队列成品（已被 runner 搬抽屉，收下=清窗空操作）
-        if (CQ.jfSeen !== d.justFinished && d.justFinished > 0) {
-            CQ.jfSeen = d.justFinished;
-            var box = f.doc.getElementById('crafting-result-box');
-            if (box && box.style.display !== 'none') {
-                var take = f.doc.getElementById('res-btn-take');
-                if (take) take.click();
+                if (el) el.style.width = Math.min(100, (parseFloat(el.style.width) || 0) + 2) + '%';
             }
         }
     }, 250);

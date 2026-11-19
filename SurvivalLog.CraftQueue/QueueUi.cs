@@ -28,6 +28,8 @@ internal static class QueueUi
     private static string _lastSig = "";         // 快照签名（变化才推）
     private static Il2CppSystem.Action<string> _ackCb;
     private static Il2CppSystem.Action<string> _drainCb;
+    private static Il2CppSystem.Action<string> _probeCb;
+    private static bool _live;                              // js 存活（CQ_OK 确认；探针失守即重注全量）
     private static int _ackCount;
 
     // GetStateByUI 键=UI 类型（DrawerTabs 先例），非 State 类型
@@ -43,6 +45,7 @@ internal static class QueueUi
                 if (_ackCount == 1)
                     CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] 首次 JS 注入回执: " +
                         (string.IsNullOrEmpty(r) ? "(空)" : r));
+                if (r == "CQ_OK") _live = true;
             }));
 
     internal static void FastPoll()
@@ -66,41 +69,29 @@ internal static class QueueUi
                 new Action<string>(OnDrain));
         try { web.ExecuteJavaScript("window.__CQ__&&__CQ__.drain()", _drainCb); } catch { }
 
-        // ① bootstrap 幂等注入（WebView 重建自动重挂；页面侧 IIFE 双重幂等）。
-        //    尾分号必须去掉：括号内分号=SyntaxError（实机二轮定位）。
-        var boot = _bootstrap.TrimEnd(';', ' ', '\r', '\n', '\t');
-        // 逗号表达式尾部带自证标记：回执参数可判注入成败（CQ_OK/CQ_BAD）
-        web.ExecuteJavaScript("(window.__CQ__||(" + boot + "),window.__CQ__?'CQ_OK':'CQ_BAD')", Ack);
-
-        // ①b 压掉队列制作的官方「正在打造」遮罩：官方 CheckResult 不分台（全局单例语义，
-        // 反汇编实证），队列在别的台制作也会推 isCrafting=true 锁前台 UI。
-        // 只在「队列有在制任务 && 当前台不在制作」时压（当前台 Making=玩家前台自己做的，不碰）。
-        try
+        // ① 注入探活制（卡顿根因修复 2026-11-19）：此前每 0.5s 重发 ~40KB bootstrap 全文，
+        // WebView2 脚本队列被持续塞爆 → 前台 HUD/界面卡顿变形 + CE 推送通道饥饿（日志实证）。
+        // 改 CE RailUi 同款纪律：存活期每轮只发几十字节探针；探活失败才发一剂全量（尾分号
+        // 必须去掉——括号内分号=SyntaxError，实机二轮定位）。
+        if (_live)
         {
-            var st = ToolTableState();
-            var rp = st?.IsCrafting;
-            if (rp != null && rp.Value)
-            {
-                bool qMaking = false;
-                for (int i = 0; i < QueueState.Tasks.Count; i++)
-                    if (QueueState.Tasks[i].Status == TaskStatus.Dispatched) { qMaking = true; break; }
-                if (qMaking)
-                {
-                    var furn = st.CurrentFurnitureId;
-                    var world = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.Instance;
-                    var curMaking = world != null && world._ToolTableManager != null &&
-                        world._ToolTableManager.GetToolTableState(furn) == GameCore.HotUpdate.HandMadeState.Making;
-                    if (!curMaking)
-                    {
-                        rp.Value = false;
-                        // 成品弹窗同源压制：ResultShow=true=官方完成链推了结果弹窗（队列台的）——关掉
-                        var rs = st.ResultShow;
-                        if (rs != null && rs.Value) rs.Value = false;
-                    }
-                }
-            }
+            if (_probeCb == null)
+                _probeCb = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<string>>(
+                    new Action<string>(r => { if (r != "1") _live = false; }));
+            try { web.ExecuteJavaScript("window.__CQ__?1:0", _probeCb); } catch { _live = false; }
         }
-        catch { }
+        else
+        {
+            var boot = _bootstrap.TrimEnd(';', ' ', '\r', '\n', '\t');
+            try { web.ExecuteJavaScript("(window.__CQ__||(" + boot + "),window.__CQ__?'CQ_OK':'CQ_BAD')", Ack); } catch { }
+        }
+
+        // ①b 弹窗/遮罩推送层拦截（唯一防线，无兜底）：订阅官方 IsCrafting/ResultShow 两个
+        // ReactiveProperty——官方写 true 的同帧回调里，若判定为队列台的制作/完成（当前台不在
+        // 玩家自己制作且非 WaitingReceive=玩家自己刚做完），立即写回 false。webui 推送是脏标记
+        // 批量机制（当帧稍后 flush），flush 时值已是 false → 前台从头到尾收不到，弹窗不渲染。
+        // 自己写回 false 会再次触发订阅（e=false）→ 自然终止，无重入。
+        WatchStateProps();
 
         // ② 快照推送：签名变化才推（含精力/可做件数/刚完成标记；制作中百分比由 js 本地补间）
         var snap = QueueState.SnapshotJson();
@@ -193,6 +184,68 @@ internal static class QueueUi
     }
 
     internal static State_Web_ToolTable ToolTableStatePublic() => ToolTableState();
+
+    private static State_Web_ToolTable _watchedState;      // 已订阅的 state 实例（UI 重开重建即重订）
+    private static readonly System.Collections.Generic.List<Il2CppSystem.IDisposable> _subs = new();
+
+    /// <summary>订阅官方弹窗开关（幂等；UI 重开自动重订）。拦截判定见调用点注释。</summary>
+    private static void WatchStateProps()
+    {
+        try
+        {
+            var st = ToolTableState();
+            if (st == null)
+            {
+                if (_watchedState != null) { foreach (var d in _subs) d?.Dispose(); _subs.Clear(); _watchedState = null; }
+                return;
+            }
+            if (ReferenceEquals(st, _watchedState)) return;      // 已订阅
+            foreach (var d in _subs) d?.Dispose();
+            _subs.Clear();
+            _watchedState = st;
+            var cb = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<bool>>(
+                new Action<bool>(v => { if (v) OnOfficialPopupSwitch(); }));
+            Il2CppSystem.IDisposable d1 = null, d2 = null;
+            // 审查修1：AnonymousRObserver<bool> 是 AOT 未实例化的值类型泛型组合（运行时构造可能抛异常
+            // 被吞=拦截静默失效）；改用 ObservableSubscribeExtensions.Subscribe<bool>(source, Action)
+            // ——dump 实证该组合游戏自身实例化过（RVA 0xDBBB00），AOT 安全。
+            try { if (st.IsCrafting != null) d1 = R3.ObservableSubscribeExtensions.Subscribe<bool>(st.IsCrafting, cb); }
+            catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] IsCrafting 订阅失败: " + e.Message); }
+            try { if (st.ResultShow != null) d2 = R3.ObservableSubscribeExtensions.Subscribe<bool>(st.ResultShow, cb); }
+            catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] ResultShow 订阅失败: " + e.Message); }
+            if (d1 != null) _subs.Add(d1);
+            if (d2 != null) _subs.Add(d2);
+        }
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 弹窗订阅异常: " + e.Message); }
+    }
+
+    /// <summary>官方弹窗开关被置 true（同帧）：判定来源，队列相关则写回 false 掐断推送。</summary>
+    private static void OnOfficialPopupSwitch()
+    {
+        try
+        {
+            // 队列在制 or 刚完成（3s 窗）
+            bool qActive = QueueState.JustDoneAt > 0 && UnityEngine.Time.unscaledTime - QueueState.JustDoneAt < 3f;
+            for (int i = 0; i < QueueState.Tasks.Count; i++)
+                if (QueueState.Tasks[i].Status == TaskStatus.Dispatched) { qActive = true; break; }
+            if (!qActive) return;
+            // 玩家前台特征：当前台在制作（自己做）或 WaitingReceive（自己刚做完要收下）→ 不拦
+            var st = _watchedState;
+            if (st == null) return;
+            var world = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.Instance;
+            var ttm = world?._ToolTableManager;
+            if (ttm == null) return;
+            var cur = ttm.GetToolTableState(st.CurrentFurnitureId);
+            if (cur == GameCore.HotUpdate.HandMadeState.Making || cur == GameCore.HotUpdate.HandMadeState.WaitingReceive)
+                return;
+            // 队列台事件：同帧掐断
+            st.IsCrafting.Value = false;
+            st.ResultShow.Value = false;
+            if (CraftQueuePlugin.CfgVerbose.Value)
+                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] 队列弹窗已在推送层掐断");
+        }
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 弹窗拦截异常: " + e.Message); }
+    }
 
     /// <summary>ToolTable state（界面未开=null，DrawerTabs.GetStateByUI 同款非泛型路径）。</summary>
     private static State_Web_ToolTable ToolTableState()

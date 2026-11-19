@@ -26,6 +26,7 @@ internal static class QueueRunner
     private static float _nextPoll;
     private static float _drawerCountAt = -999f;
     private static float _resumeAt;                          // 完成→下一件派发的错峰时刻
+    private static Dictionary<long, long> _preProductIds;    // 派发前成品 id 快照（完成 diff 用）
     private static long _busyFurnId;          // 当前派发到的家具（0=无在制）
     private static int _dispatchTick;         // 拒绝判定窗口计数
 
@@ -51,6 +52,28 @@ internal static class QueueRunner
     /// <summary>帧入口（QueueTicker.Update 每帧调，内部 0.5s 节流）。</summary>
     internal static void FastPoll()
     {
+        // 帧级快通道：在制任务完成检测（完成帧立即收尾，不等 0.5s 门闩）
+        if (_busyFurnId != 0)
+        {
+            try
+            {
+                var busy = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Dispatched);
+                if (busy != null)
+                {
+                    var st = TTM().GetToolTableState(_busyFurnId);
+                    if (st != HandMadeState.Making && st != HandMadeState.Idle)
+                    {
+                        // 完成：立即收尾（不等 0.5s 门闩）+ 帧率探针（完成帧耗时归因）
+                        var sw0 = System.Diagnostics.Stopwatch.StartNew();
+                        Poll();
+                        sw0.Stop();
+                        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner][探针] 完成帧：mod 收尾 {sw0.ElapsedMilliseconds}ms，本帧 dt={UnityEngine.Time.unscaledDeltaTime * 1000f:F0}ms");
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
         if (UnityEngine.Time.unscaledTime < _nextPoll) return;
         _nextPoll = UnityEngine.Time.unscaledTime + 0.5f;
         try { Poll(); }
@@ -73,6 +96,7 @@ internal static class QueueRunner
             QueueState.ReservedItemIds.Clear();
             QueueState.StaminaPaused = false;
             QueueState.JustFinishedTaskId = 0;
+            QueueState.JustDoneAt = -999f;
             _busyFurnId = 0;
         }
         RefreshRuntimeFields();
@@ -92,14 +116,26 @@ internal static class QueueRunner
             TryRecoverStamina();
             return;
         }
-        // ③ Blocked 任务补料自动恢复（先于新派发，保持队首语义）
-        var blocked = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Blocked);
+        // ③ Blocked 任务恢复（先于新派发）：仅缺料型走补料重试；无台型等下一轮自然重试派发
+        //（审查修3：无台型若走补料恢复会 0.5s 翻转循环——全容器扫描+双遍历+列表重渲染每轮发生）
+        var blocked = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Blocked && !t.BlockedReason.Contains("制作台"));
         if (blocked != null && TryRecoverBlocked(blocked)) return;
+        var noTable = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Blocked && t.BlockedReason.Contains("制作台"));
+        if (noTable != null) { noTable.Status = TaskStatus.Queued; }   // 重试派发一次（失败再 Blocked，3s 错峰限频）
 
         // ④ 派发队首
         if (UnityEngine.Time.unscaledTime < _resumeAt) return;   // 完成错峰窗口
         var next = QueueState.Tasks.FirstOrDefault(t => t.Status == TaskStatus.Queued);
-        if (next != null) TryDispatch(next);
+        if (next != null)
+        {
+            TryDispatch(next);
+            if (next.Status == TaskStatus.Queued && UnityEngine.Time.unscaledTime >= _resumeAt)
+            {
+                // 派发失败（非错峰窗原因）→ 无合格台：标红，不静默等待
+                next.Status = TaskStatus.Blocked;
+                next.BlockedReason = "无可用制作台（需要同型号或有储物格的空闲工作台）";
+            }
+        }
     }
 
     /// <summary>刷新快照运行字段（精力/抽屉占用/档位容量）。</summary>
@@ -272,33 +308,77 @@ internal static class QueueRunner
             return;
         }
         var furn = FindIdleTable();
-        if (furn == 0) return;                    // 无空闲台：等待（台子被拆自然落此分支）
+        if (furn == 0) return;                    // 无合格台（调用方转 Blocked）
         var ttm = TTM();
         ttm.StartProduction(furn, ToIl2Cpp(t.ReservedItemIds));
         _busyFurnId = furn;
         _dispatchTick = 0;
+        _preProductIds = t.ProductIconId > 0 && !t.IsFurniture ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：完成后 diff（官方同款模式）
         t.Status = TaskStatus.Dispatched;
         if (CraftQueuePlugin.CfgVerbose.Value)
             CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId} → 家具 0x{furn:X}");
     }
 
+    /// <summary>
+    /// 两级筛选（审查定案）：ToolTableMap 含全部家具（RegisterToolTable 无类型筛选，反汇编实证）——
+    /// ① 逻辑层判据：Furniture 且 Config_Furniture.BagId>0（BagId=0 家具收成品=官方静默丢弃，
+    /// TryAddItemToBag 无 fallback，反汇编实证）；② 优先与当前打开工作台同型号（AgentConfigId 相同）。
+    /// 无合格台 → 0（任务方 Blocked「无可用制作台」）。
+    /// </summary>
     private static long FindIdleTable()
     {
         try
         {
             var map = TTM().ToolTableMap;
-            if (map == null) return 0;
+            var am = World()?._AgentManager;
+            var cm = CM();
+            var fd = cm?._Config_Furniture_Dict;
+            if (map == null || am == null || fd == null) return 0;
             long openFurn = QueueUi.CurrentToolTableFurnitureId();
+            int openCfg = 0;
+            try
+            {
+                foreach (var ag in am.agentList)
+                {
+                    var f0 = ag?.TryCast<Furniture>();
+                    if (f0 != null && f0.InstanceId == openFurn) { openCfg = f0.AgentConfigId; break; }
+                }
+            }
+            catch { }
+            long sameCfg = 0, anyBag = 0;
             foreach (var kv in map)
             {
                 if (kv.Value == null) continue;
-                if (kv.Key == openFurn) continue;                       // 避开当前打开的台：官方 UI 对当前台 Making 弹制作遮罩并锁界面——队列走别的台（单台=关界面后开工）
-                if ((int)kv.Value.State != 0) continue;                 // 非 Idle=忙（含前台在制/没收成品）
-                return kv.Key;
+                if (kv.Key == openFurn) continue;                       // 避开玩家正开的台
+                if ((int)kv.Value.State != 0) continue;                 // 非 Idle=忙
+                var furn = FindFurniture(am, kv.Key);
+                if (furn == null) continue;
+                Config_Furniture cfg = null;
+                try { fd.TryGetValue(furn.AgentConfigId, out cfg); } catch { }
+                var bagId = 0;
+                try { if (cfg != null) bagId = cfg.BagId; } catch { }
+                if (bagId <= 0) continue;                               // ① 无包家具=成品静默丢弃
+                if (openCfg != 0 && furn.AgentConfigId == openCfg && sameCfg == 0) sameCfg = kv.Key;   // ② 同型号优先
+                if (anyBag == 0) anyBag = kv.Key;
             }
+            return sameCfg != 0 ? sameCfg : anyBag;
         }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 找空闲台异常: " + e.Message); }
         return 0;
+    }
+
+    private static Furniture FindFurniture(AgentManager am, long instanceId)
+    {
+        try
+        {
+            foreach (var ag in am.agentList)
+            {
+                var f = ag?.TryCast<Furniture>();
+                if (f != null && f.InstanceId == instanceId) return f;
+            }
+        }
+        catch { }
+        return null;
     }
 
     // ── 收尾 ─────────────────────────────────────────────────────────
@@ -353,8 +433,9 @@ internal static class QueueRunner
             return;
         }
         t.Left--;
-        QueueState.JustFinishedTaskId = t.TaskId;            // js 据此自动清官方成品弹窗（终审 I4/I5）
-        _resumeAt = UnityEngine.Time.unscaledTime + 1.5f;    // 错峰：给官方完成链（统计/notify）让路，治连续卡顿
+        QueueState.JustFinishedTaskId = t.TaskId;
+        QueueState.JustDoneAt = UnityEngine.Time.unscaledTime;   // 弹窗拦截 3s 窗 + 面板刷新
+        _resumeAt = UnityEngine.Time.unscaledTime + 3f;      // 错峰 3s：官方完成链（统计/notify/归置）主线程卡顿的来源，拉开间隔
         if (t.Left <= 0)
         {
             t.Status = TaskStatus.Done;
@@ -379,56 +460,87 @@ internal static class QueueRunner
     }
 
     /// <summary>
-    /// 成品收尾（2026-11-19 全容器取证定案）：官方 TryCreateItem 的成品进玩家背包（全局 owner），
-    /// 随后游戏机器人归置会把它搬进柜子/抽屉（按标签）。队列语义=尽量进抽屉：
-    /// ① 完成后 0.5s 轮询窗口内从背包抢搬抽屉；② 抽屉装不下→逐件掉落地面；
-    /// ③ 背包已没有=机器人已归置→接受，日志说明。
-    /// （旧逻辑查 furnId 台面/全容器扫描均废弃——成品不经台面。）
+    /// 成品收尾（2026-11-19 定案：快照 diff 法——派发前记录该 configId 全容器 id 集，
+    /// 完成帧（&lt;100ms）对比新增=本件成品，无论官方把它写进哪个容器都精确搬进抽屉。
+    /// 官方内部输出位是黑盒（[单例+0x78]，实测落在取料相关容器），不再对其做任何假设。
     /// </summary>
     private static void CollectProducts(CraftTask t, long furnId)
     {
         if (t.IsFurniture || t.ProductIconId <= 0) return;      // 家具包裹：官方直送玄关
+        var cur = ScanProductIds(t.ProductIconId, furnId);
+        var fresh = new List<long>();
+        var owners = new Dictionary<long, long>();
+        foreach (var kv in cur)
+        {
+            if (_preProductIds != null && _preProductIds.ContainsKey(kv.Key)) continue;
+            fresh.Add(kv.Key);
+            owners[kv.Key] = kv.Value;
+        }
+        if (fresh.Count == 0)
+        {
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品 #{t.ProductIconId} 无新增实例（家具包裹已在玄关/官方未产出），去向日志见上轮取证");
+            return;
+        }
+        // 按 owner 分组搬进抽屉
         var im = IM();
         var drawerOwner = DrawerOwner();
-        long bagOwner = 0;
-        try { bagOwner = ActionDispatcher.GetLeadingRoleAgentId(); } catch { }
-        if (bagOwner == 0 || im == null) return;
+        var byOwner = new Dictionary<long, List<long>>();
+        foreach (var id in fresh)
+        {
+            if (!byOwner.TryGetValue(owners[id], out var list)) byOwner[owners[id]] = list = new List<long>();
+            list.Add(id);
+        }
+        int movedTotal = 0, droppedTotal = 0;
+        foreach (var g in byOwner)
+        {
+            int moved = 0;
+            try { moved = im.TryQuickMoveItems(ToIl2Cpp(g.Value), g.Key, drawerOwner, true); } catch { }
+            movedTotal += moved;
+            if (moved == g.Value.Count) continue;
+            // 抽屉满：残留掉地面（id 先快照再 Drop）
+            var leftIds = new List<long>();
+            var lst = im.GetItemDataList(g.Key);
+            if (lst != null)
+                for (int i = 0; i < lst.Count; i++)
+                {
+                    long id = 0;
+                    try { id = lst[i].InstanceId; } catch { }
+                    if (id != 0 && fresh.Contains(id)) leftIds.Add(id);
+                }
+            var dim = DIM();
+            foreach (var id in leftIds)
+                try { if (dim.DropItemFromBag(id)) droppedTotal++; } catch { }
+        }
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品入抽屉 ×{movedTotal}" + (droppedTotal > 0 ? $"，抽屉满落地 ×{droppedTotal}" : ""));
+    }
 
-        var bagList = im.GetItemDataList(bagOwner);
-        var found = new List<long>();
-        if (bagList != null)
+    /// <summary>扫描某 configId：id → 所在 owner。owner>0=单容器（队列台，官方同款快照/diff 模式）；
+    /// owner=0=全容器（仅诊断用）。</summary>
+    private static Dictionary<long, long> ScanProductIds(int configId, long ownerOnly)
+    {
+        var result = new Dictionary<long, long>();
+        try
         {
-            for (int i = 0; i < bagList.Count; i++)
+            var rus = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ReduxUI.ReduxUISystem>.Instance;
+            GameCore.HotUpdate.ReduxUI.BaseReduxState raw = null;
+            rus?.reduxStoreLayer?.dataTree?.TryGetValue(
+                Il2CppInterop.Runtime.Il2CppType.From(typeof(GameCore.HotUpdate.ReduxUI.State_Data_Item)), out raw);
+            var bagCache = raw?.TryCast<GameCore.HotUpdate.ReduxUI.State_Data_Item>()?.BagCache;
+            var im = IM();
+            if (bagCache == null || im == null) return result;
+            foreach (var kv in bagCache)
             {
-                try { if (bagList[i].ItemConfigId == t.ProductIconId) found.Add(bagList[i].InstanceId); } catch { }
+                if (ownerOnly != 0 && kv.Key != ownerOnly) continue;
+                var lst = im.GetItemDataList(kv.Key);
+                if (lst == null) continue;
+                for (int i = 0; i < lst.Count; i++)
+                {
+                    try { if (lst[i].ItemConfigId == configId) result[lst[i].InstanceId] = kv.Key; } catch { }
+                }
             }
         }
-        if (found.Count == 0)
-        {
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品 #{t.ProductIconId} 不在背包——已被游戏归置（机器人/其他），接受该去向");
-            return;
-        }
-        int moved = 0;
-        try { moved = im.TryQuickMoveItems(ToIl2Cpp(found), bagOwner, drawerOwner, true); } catch { }
-        if (moved == found.Count)
-        {
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品入抽屉 ×{moved}");
-            return;
-        }
-        var leftList = im.GetItemDataList(bagOwner);
-        var dropIds = new List<long>();
-        if (leftList != null)
-        {
-            for (int i = 0; i < leftList.Count; i++)
-            {
-                try { if (leftList[i].ItemConfigId == t.ProductIconId) dropIds.Add(leftList[i].InstanceId); } catch { }
-            }
-        }
-        var dim = DIM();
-        int dropped = 0;
-        foreach (var id in dropIds)
-            try { if (dim.DropItemFromBag(id)) dropped++; } catch { }
-        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 抽屉装不下：入抽屉 {moved}，落地 {dropped}");
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 成品扫描异常: " + e.Message); }
+        return result;
     }
 
     /// <summary>直写复位（Ruling 见类头）：State=Idle + 清预扣清单。</summary>
