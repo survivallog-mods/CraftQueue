@@ -101,16 +101,6 @@ internal static class MaterialPicker
             unit[materialIds[mi]] = u + 1;
         }
 
-        // 抽屉容量（近似口径：剩余格 ≥ 单份种类数——分组占格≥扁平，抽屉满由搬运核验兜底）
-        var drawerItems = im.GetItemDataList(drawerOwner);
-        int drawerUsed = drawerItems?.Count ?? 0;
-        if (QueueState.DrawerCap - drawerUsed < unit.Count)
-        {
-            QueueState.DrawerUsed = drawerUsed;
-            fail = PickFail.DrawerFull;
-            return groups;
-        }
-
         // 候选池（顺序：背包 → 柜子 → 抽屉未预占；单件粒度过滤）
         var pool = new List<(long id, int cid, int cnt, long owner)>();
         bool overStackOnly = false;

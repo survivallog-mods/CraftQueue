@@ -548,8 +548,20 @@ internal static class QueueRunner
         try { CollectProducts(t, _busyFurnId); }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收尾异常: " + e.Message); }
         if (swp.ElapsedMilliseconds > 300) CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 收尾耗时 成品搬运={swp.ElapsedMilliseconds}ms");
-        try { GameCore.HotUpdate.ReduxUI.Ac_ToolTable_ResultConfirm.SendAction(); }
-        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 代发收下异常: " + e.Message); }
+        // 代发 ResultConfirm 会触发官方 GetNew→RefreshBagUI→ReturnBenchItemsToOrigins——
+        // 全局单例不分台，把玩家前台台面的备料清回背包（用户实测问题②）。改为直写官方收下
+        // 的等价复位（RA_ResultConfirm 0x2D38B70 三动作：ResultShow=false/PendingCraftAgain=false/
+        // 非 BatchKeepBench 才发 GetNew——我们不发 GetNew=保留玩家台面；官方批量模式同款取舍）
+        try
+        {
+            var st = QueueUi.ToolTableStatePublic();
+            if (st != null)
+            {
+                st.ResultShow.Value = false;
+                st.PendingCraftAgain = false;
+            }
+        }
+        catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 收下复位异常: " + e.Message); }
         _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _busyFurnId = 0;
 

@@ -95,9 +95,16 @@ internal static class QueueUi
 
         // ② 快照推送：签名变化才推（含精力/可做件数/刚完成标记；制作中百分比由 js 本地补间）
         var snap = QueueState.SnapshotJson();
+        // 签名覆盖全部任务（不只 [0]——多任务时后续任务状态变化也要触发推送：blocked 挂起/
+        // 补料恢复等，否则面板永远收不到更新），与 js 侧渲染签名同构
+        var taskSig = new System.Text.StringBuilder();
+        for (int i = 0; i < QueueState.Tasks.Count; i++)
+        {
+            var tk = QueueState.Tasks[i];
+            taskSig.Append(tk.TaskId).Append(':').Append((int)tk.Status).Append(':').Append(tk.Left).Append(';');
+        }
         var sig = (int)QueueState.Stamina + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
-                  QueueState.DrawerUsed + "|" + QueueState.JustFinishedTaskId + "|" +
-                  QueueState.Tasks.Count + "|" + (QueueState.Tasks.Count > 0 ? QueueState.Tasks[0].TaskId + ":" + (int)QueueState.Tasks[0].Status + ":" + QueueState.Tasks[0].Left : "");
+                  QueueState.DrawerUsed + "|" + QueueState.JustFinishedTaskId + "|" + taskSig.ToString();
         if (sig == _lastSig) return;
         _lastSig = sig;
         QueueState.JustFinishedTaskId = 0;      // 已入快照：消费即清（下轮不再误报）

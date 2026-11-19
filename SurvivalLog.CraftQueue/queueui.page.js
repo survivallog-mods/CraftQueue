@@ -210,7 +210,8 @@
         if (!f) return;
         hookSend(f.win);   // 界面重开补挂取 key 钩（iframe 重建后 setData 未到也要能捕获 RECIPE_CLICK——审查修3）
         // 界面重开补挂（iframe 重建后 setData 未到也要有按钮/面板——审查修2）+ making 进度本地推进
-        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); render(f.doc); return; }
+        // iframe 重建=列表 DOM 已空但 CQ.sig 残留旧值→签名相同跳过渲染=徽章有数列表空（用户实测③）——补挂时强制失效签名
+        if (!f.doc.getElementById('cq-head-btn') && CQ.data) { CQ.sig = ''; mount(f.doc, f.win); render(f.doc); return; }
         if (CQ.data && CQ.data.tasks) {
             var list = f.doc.getElementById('cq-list');
             if (list) for (var i = 0; i < CQ.data.tasks.length; i++) {
