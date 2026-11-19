@@ -63,6 +63,20 @@ internal static class QueueRunner
     /// <summary>帧入口（QueueTicker.Update 每帧调：同帧抵消 + 帧级完成检测 + 0.5s 节流轮询）。</summary>
     internal static void FastPoll()
     {
+        // 队列在制=活跃（2026-11-19 实证修复）：官方完成冻结可能发生在 Dispatched 全程任意时刻
+        //（UI 开着时官方完成走「弹窗等收下」路径必 OnPause，两轮实机日志 True×N 实证）——
+        // 原判定只认派发/完成瞬间 2s 窗，单件制作 >2s 后完成帧窗口必过期 → 同帧抵消从未生效。
+        // 在制期间持续刷新活跃时间戳，窗口覆盖整个制作期（栈过滤 ToolTableManager 源不变，第二道保险仍在）。
+        try
+        {
+            for (int i = 0; i < QueueState.Tasks.Count; i++)
+                if (QueueState.Tasks[i].Status == TaskStatus.Dispatched)
+                {
+                    _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
+                    break;
+                }
+        }
+        catch { }
         NeutralizePauseTick();                              // 同帧抵消官方完成冻结（每帧，先于一切）
         // 帧级快通道：在制任务完成检测（完成帧立即收尾，不等 0.5s 门闩）
         if (_busyFurnId != 0)
@@ -110,7 +124,10 @@ internal static class QueueRunner
             var cur = HandMadeState.Idle;
             if (furn != 0 && w._ToolTableManager != null)
                 cur = w._ToolTableManager.GetToolTableState(furn);
-            if (cur == HandMadeState.Making || cur == HandMadeState.WaitingReceive) return;  // 玩家前台事件
+            // 玩家前台完成/失败态保护（审查修：Making 期间 TTM 源暂停必来自队列台完成——玩家台
+            // 在制时不存在「玩家自己的完成冻结」；原 Making 子句会把 B 完成的冻结误判为玩家事件
+            // → 冤枉冻结到官方超时（主用例：前台自己做+队列后台跑））
+            if (cur == HandMadeState.WaitingReceive || cur == HandMadeState.NoReceive) return;
             w.OnResume();
             if (CraftQueuePlugin.CfgVerbose.Value)
                 CraftQueuePlugin.Log.LogInfo("[CraftQueue.Runner] 官方完成冻结已同帧抵消");
@@ -203,10 +220,12 @@ internal static class QueueRunner
     // ── 入队（QueueUi 调）────────────────────────────────────────────
 
     /// <summary>
-    /// 入队（官方心智：台面有料即可做）。第一件=台面现料搬进抽屉预占；后续件按配方表取料。
-    /// 台面=当前打开的工作台（CurrentFurnitureId）；配方=官方 GetProductionByMaterials 反推。
+    /// 入队（官方心智：台面有料即可做；2026-11-19 扩展 recipeKey 直取）。第一件优先=台面现料
+    /// 搬进抽屉预占（与所选配方一致时）；台面无料/不构成配方且带 recipeKey → MaterialPicker
+    /// 全链（背包→柜子→抽屉未预占）直接取料——入队不再依赖台面摆料（Gate 拦摆料时仍可入队）。
+    /// 台面=当前打开的工作台（WorkbenchOwnerId）；配方=官方 GetProductionByMaterials 反推。
     /// </summary>
-    internal static bool Enqueue(int qty, out string failMsg)
+    internal static bool Enqueue(int qty, string recipeKey, out string failMsg)
     {
         failMsg = "";
         qty = Math.Clamp(qty, 1, 99);
@@ -218,35 +237,64 @@ internal static class QueueRunner
         if (benchOwner == 0) { failMsg = "工作台未打开"; return false; }
         Il2CppSystem.Collections.Generic.List<ItemData> bench = null;
         try { bench = im.GetItemDataList(benchOwner); } catch { }
-        if (bench == null || bench.Count == 0) { failMsg = "请先把材料放上工作台（点配方或拖材料）"; return false; }
 
+        // 路径 B（key 直取）：台面无料或台面料不构成所选配方 → 按配方表全链取料
+        Config_ProductionList cfg = null;
+        List<long> firstIds = null;
         var benchIds = new List<long>();
         var matIds = new Il2CppSystem.Collections.Generic.List<int>();
-        for (int i = 0; i < bench.Count; i++)
+        if (bench != null)
         {
-            long id = 0; int cid = 0, cnt = 0;
-            try { id = bench[i].InstanceId; cid = bench[i].ItemConfigId; cnt = bench[i].ItemCount; } catch { continue; }
-            if (id == 0) continue;
-            benchIds.Add(id);
-            for (int k = 0; k < cnt; k++) matIds.Add(cid);
+            for (int i = 0; i < bench.Count; i++)
+            {
+                long id = 0; int cid = 0, cnt = 0;
+                try { id = bench[i].InstanceId; cid = bench[i].ItemConfigId; cnt = bench[i].ItemCount; } catch { continue; }
+                if (id == 0) continue;
+                benchIds.Add(id);
+                for (int k = 0; k < cnt; k++) matIds.Add(cid);
+            }
         }
-        if (matIds.Count == 0) { failMsg = "请先把材料放上工作台"; return false; }
-
-        Config_ProductionList cfg = null;
-        try { cfg = CM().GetProductionByMaterials(matIds)?.Item1; } catch { }
-        if (cfg == null)
+        if (matIds.Count > 0)
         {
-            var dbg = new System.Text.StringBuilder();
-            for (int i = 0; i < matIds.Count && i < 12; i++) dbg.Append(' ').Append(matIds[i]);
-            CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 台面材料不构成配方（{matIds.Count} 件）：{dbg}");
-            failMsg = "台面上的材料不构成配方";
-            return false;
+            try { cfg = CM().GetProductionByMaterials(matIds)?.Item1; } catch { }
         }
-
-        // 台面现料搬进抽屉=第一件预占；搬运不完整=抽屉满，放弃
-        int moved = 0;
-        try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchOwner, drawerOwner, true); } catch { }
-        if (moved != benchIds.Count) { failMsg = "工作台抽屉放不下材料"; return false; }
+        int keyRecipeId = string.IsNullOrEmpty(recipeKey) ? 0 : CraftGate.ResolveRecipe(recipeKey);
+        if (cfg == null || (keyRecipeId > 0 && cfg.ID != keyRecipeId))
+        {
+            // 台面不构成配方/与所选配方不一致 → key 直取（清台面语义不引入：台面料留在台面由玩家自理）
+            if (keyRecipeId <= 0)
+            {
+                var dbg = new System.Text.StringBuilder();
+                for (int i = 0; i < matIds.Count && i < 12; i++) dbg.Append(' ').Append(matIds[i]);
+                if (matIds.Count > 0)
+                    CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 台面材料不构成配方（{matIds.Count} 件）：{dbg}");
+                failMsg = matIds.Count > 0 ? "台面上的材料不构成配方" : "请先在制造笔记选择配方";
+                return false;
+            }
+            cfg = MaterialPicker.ProductionCfg(keyRecipeId);
+            if (cfg?.MaterialList == null) { failMsg = "配方不可用"; return false; }
+            firstIds = MaterialPicker.PickAndReserve(cfg.MaterialList, out var pf);
+            if (firstIds.Count == 0)
+            {
+                failMsg = pf switch
+                {
+                    PickFail.Shortage => "材料不足（背包/柜子/抽屉）",
+                    PickFail.DrawerFull => "工作台抽屉放不下材料",
+                    PickFail.Variant => "含染料变体的配方暂不支持队列",
+                    PickFail.Partial => "材料堆叠超过需求，请先整理",
+                    _ => "取料失败",
+                };
+                return false;
+            }
+        }
+        else
+        {
+            // 路径 A（台面现料）：搬进抽屉=第一件预占；搬运不完整=抽屉满，放弃
+            int moved = 0;
+            try { moved = im.TryQuickMoveItems(ToIl2Cpp(benchIds), benchOwner, drawerOwner, true); } catch { }
+            if (moved != benchIds.Count) { failMsg = "工作台抽屉放不下材料"; return false; }
+            firstIds = benchIds;
+        }
 
         string name = ""; int icon = 0; bool isFurn = false;
         try
@@ -276,11 +324,11 @@ internal static class QueueRunner
             IsFurniture = isFurn,
             Status = TaskStatus.Queued,
         };
-        t.ReservedItemIds.AddRange(benchIds);
+        t.ReservedItemIds.AddRange(firstIds);
         QueueState.Add(t);
         QueueState.SyncReservedIds();
         if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（台面现料 {benchIds.Count} 件已锁抽屉）");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（预占 {firstIds.Count} 件已锁抽屉）");
         return true;
     }
 

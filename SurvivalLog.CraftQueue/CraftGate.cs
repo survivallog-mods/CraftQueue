@@ -149,8 +149,9 @@ internal static class CraftGate
     /// <summary>QueueUi 入队用：最近前台配方 → 配方 ID（解析失败 0）。</summary>
     internal static int LastRecipeId => string.IsNullOrEmpty(LastRecipeKey) ? 0 : ResolveRecipe(LastRecipeKey);
 
-    /// <summary>recipeKey → 配方 ID：官方同源 ToProductionKey 全表生成比对（懒构建缓存）。</summary>
-    private static int ResolveRecipe(string key)
+    /// <summary>recipeKey → 配方 ID：官方同源 ToProductionKey 全表生成比对（懒构建缓存）。
+    /// Enqueue 直取路径共用（2026-11-19：入队不再依赖台面摆料——Gate 拦摆料时入队仍可用）。</summary>
+    internal static int ResolveRecipe(string key)
     {
         if (_keyToRecipe != null)
             return _keyToRecipe.TryGetValue(key, out var id) ? id : 0;

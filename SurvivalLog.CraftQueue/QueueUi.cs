@@ -116,7 +116,8 @@ internal static class QueueUi
                 if (op == "enqueue")
                 {
                     var qty = ExtractInt(seg, "qty");
-                    if (QueueRunner.Enqueue(qty <= 0 ? 1 : qty, out var failMsg))
+                    var key = ExtractStr(seg, "key");
+                    if (QueueRunner.Enqueue(qty <= 0 ? 1 : qty, key, out var failMsg))
                         Ac_PopText_AddPopText.SendAction("已加入制作队列（材料已锁进抽屉）");
                     else
                     {

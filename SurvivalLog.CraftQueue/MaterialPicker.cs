@@ -168,13 +168,24 @@ internal static class MaterialPicker
     /// <summary>配方配置（Enqueue 建任务用；null=查无）。</summary>
     public static Config_ProductionList ProductionCfg(int recipeId) => CM()?.Get_Config_ProductionList(recipeId);
 
-    /// <summary>前台拦截用：链上（背包+柜子+抽屉，刨除预占）某 configId 可用总数；
-    /// extraOwner=前台判定时的台面（spec §5.6.1 台面计入可用量，终审 I8）。</summary>
+    /// <summary>前台拦截用：链上（台面+背包+柜子+抽屉，刨除预占）某 configId 可用总数；
+    /// extraOwner=前台判定时的台面（spec §5.6.1 台面计入可用量，终审 I8——官方取料顺序
+    /// 台面最前，台面已有料本就减少本次取料需求；漏数=误拦正常前台摆料，2026-11-19 实证修复）。</summary>
     public static int CountAvailExcludingReserved(int configId, long extraOwner = 0)
     {
         var im = IM();
         var drawerOwner = DrawerOwner();
         int total = 0;
+        if (extraOwner != 0)
+        {
+            Il2CppSystem.Collections.Generic.List<ItemData> bench = null;
+            try { bench = im.GetItemDataList(extraOwner); } catch { }
+            if (bench != null)
+                foreach (var it in bench)
+                {
+                    try { if (it.ItemConfigId == configId) total += it.ItemCount; } catch { }
+                }
+        }
         foreach (var owner in CollectOwners())
         {
             Il2CppSystem.Collections.Generic.List<ItemData> items = null;

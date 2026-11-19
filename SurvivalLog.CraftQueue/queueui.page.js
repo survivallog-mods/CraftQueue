@@ -109,7 +109,8 @@
             btn.addEventListener('click', function () {
                 var qty = 1;
                 try { qty = parseInt(doc.getElementById('qty-input').value, 10) || 1; } catch (e) { }
-                CQ.cmds.push({ op: 'enqueue', qty: qty });
+                // key=最近点选的配方（hookSend 捕获）——C# 侧台面无料时按配方直取，入队不依赖摆料
+                CQ.cmds.push({ op: 'enqueue', qty: qty, key: CQ.lastKey || '' });
             });
             qtyRow.appendChild(btn);
         }
@@ -207,6 +208,7 @@
     setInterval(function () {
         var f = findToolTable();
         if (!f) return;
+        hookSend(f.win);   // 界面重开补挂取 key 钩（iframe 重建后 setData 未到也要能捕获 RECIPE_CLICK——审查修3）
         // 界面重开补挂（iframe 重建后 setData 未到也要有按钮/面板——审查修2）+ making 进度本地推进
         if (!f.doc.getElementById('cq-head-btn') && CQ.data) { mount(f.doc, f.win); render(f.doc); return; }
         if (CQ.data && CQ.data.tasks) {
