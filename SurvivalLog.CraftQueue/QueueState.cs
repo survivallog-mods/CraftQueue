@@ -81,7 +81,7 @@ public static class QueueState
     public static string SnapshotJson()
     {
         var sb = new StringBuilder(256);
-        sb.Append("{\"stamina\":").Append((int)Stamina)
+        sb.Append("{\"stamina\":").Append(Stamina.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
           .Append(",\"staminaMax\":").Append((int)StaminaMax)
           .Append(",\"canMake\":").Append(CanMake)
           .Append(",\"justFinished\":").Append(JustFinishedTaskId)

@@ -103,7 +103,7 @@ internal static class QueueUi
             var tk = QueueState.Tasks[i];
             taskSig.Append(tk.TaskId).Append(':').Append((int)tk.Status).Append(':').Append(tk.Left).Append(';');
         }
-        var sig = (int)QueueState.Stamina + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
+        var sig = QueueState.Stamina.ToString("F1") + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
                   QueueState.DrawerUsed + "|" + QueueState.JustFinishedTaskId + "|" + taskSig.ToString();
         if (sig == _lastSig) return;
         _lastSig = sig;

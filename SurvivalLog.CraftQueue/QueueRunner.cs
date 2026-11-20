@@ -191,7 +191,7 @@ internal static class QueueRunner
         }
     }
 
-    /// <summary>刷新快照运行字段（精力/抽屉占用/档位容量）。</summary>
+    /// <summary>刷新快照运行字段（精力/抽屉占用/容量——上限均官方同源实时读）。</summary>
     private static void RefreshRuntimeFields()
     {
         try
@@ -199,20 +199,39 @@ internal static class QueueRunner
             var ttm = TTM();
             if (ttm.GetCraftStamina(out var cur, out var req))             // 终审 I22：false 不更新
             {
-                QueueState.Stamina = cur;
+                QueueState.Stamina = (int)Math.Round(cur);   // 四舍五入对齐官方显示（截断会少 1）
                 if (req > 0) QueueState.CanMake = (int)(cur / req);
-                if (cur > QueueState.StaminaMax) QueueState.StaminaMax = cur;   // 满值校准（精力≤上限）
             }
+            // 精力上限：官方 SyncAttr2UI 同款读法（0x317F5D8 实证）——max 属性（101-105）走
+            // GetTotalValue_Int；此前误用 Float 版对 max 属性返回 0（当前值属性 1-5 才是 Float 版）
+            try
+            {
+                var role = World()?._AgentManager?.GetLeadingRole();
+                var ac = role != null
+                    ? GameCore.HotUpdate.Battle.Logic.AgentTools.GetAgentComponent<GameCore.HotUpdate.Battle.Logic.AttributeComponent>(role)
+                    : null;
+                int mx = ac?.GetTotalValue_Int((GameCore.HotUpdate.AttrName)103) ?? 0;
+                if (mx > 0) QueueState.StaminaMax = mx;
+            }
+            catch { }
             var im = IM();
             // 抽屉计数降频（5s）：GetItemDataList 非零开销，占用变化慢；精力保持 0.5s
             if (UnityEngine.Time.unscaledTime - _drawerCountAt > 5f)
             {
                 _drawerCountAt = UnityEngine.Time.unscaledTime;
-                var items = im?.GetItemDataList(DrawerOwner());
+                var drawerOwner = DrawerOwner();
+                var items = im?.GetItemDataList(drawerOwner);
                 QueueState.DrawerUsed = items?.Count ?? 0;
+                // 抽屉容量：官方 GetOwnerBagSize 按 owner 实时尺寸（升级档自动跟随；旧固定 120
+                // 在高档位抽屉显示错误——用户实测上限不符，2026-11-20 修）
+                try
+                {
+                    var sz = im.GetOwnerBagSize(drawerOwner);
+                    int cap = sz.x * sz.y;
+                    if (cap > 0) QueueState.DrawerCap = cap;
+                }
+                catch { }
             }
-            // 抽屉容量 v1 固定最小档 120（5010=120/5012=132/5013=144；档位运行时读取路径
-            // GetDrawerBagId 归属类不明，见 ledger Ruling，保守取最小档只影响高档位提前满判定）
         }
         catch { }
     }
