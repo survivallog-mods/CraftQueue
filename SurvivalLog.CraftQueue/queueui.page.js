@@ -46,6 +46,8 @@
         data: null, sig: '', seen: {}, mounted: null, cssDone: false, cmds: [],
 
         // C# 每周期调用取走命令队列（返回值经 ExecuteJavaScript 回调回传——CE RailCommands 同款通道）
+        // 探活分级（C# 据此跳过界面关闭期的 setData 推送）：2=工作台 iframe 可见，1=仅注入存活
+        ui: function () { return findToolTable() ? 2 : 1; },
         drain: function () {
             if (!CQ.cmds.length) return '';
             var out = JSON.stringify(CQ.cmds);

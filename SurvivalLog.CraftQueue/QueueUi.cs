@@ -30,6 +30,7 @@ internal static class QueueUi
     private static Il2CppSystem.Action<string> _drainCb;
     private static Il2CppSystem.Action<string> _probeCb;
     private static bool _live;                              // js 存活（CQ_OK 确认；探针失守即重注全量）
+    private static bool _uiVisible;                         // 工作台 iframe 可见（探活分级；不可见跳过推送）
     private static int _ackCount;
 
     // GetStateByUI 键=UI 类型（DrawerTabs 先例），非 State 类型
@@ -77,8 +78,17 @@ internal static class QueueUi
         {
             if (_probeCb == null)
                 _probeCb = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<string>>(
-                    new Action<string>(r => { if (r != "1") _live = false; }));
-            try { web.ExecuteJavaScript("window.__CQ__?1:0", _probeCb); } catch { _live = false; }
+                    new Action<string>(r =>
+                    {
+                        if (r != "2" && r != "1") { _live = false; return; }
+                        bool visible = r == "2";                       // 工作台 iframe 可见分级（探活分级制）
+                        if (visible != _uiVisible)
+                        {
+                            _uiVisible = visible;
+                            if (visible) _lastSig = "";                // 重开界面：强制补推一次（关闭期跳过的更新）
+                        }
+                    }));
+            try { web.ExecuteJavaScript("window.__CQ__?__CQ__.ui():0", _probeCb); } catch { _live = false; }
         }
         else
         {
@@ -103,6 +113,7 @@ internal static class QueueUi
             var tk = QueueState.Tasks[i];
             taskSig.Append(tk.TaskId).Append(':').Append((int)tk.Status).Append(':').Append(tk.Left).Append(';');
         }
+        if (!_uiVisible) return;   // 工作台界面关闭：跳过 setData（微指令通道继续维持，重开时补推）
         var sig = QueueState.Stamina.ToString("F1") + "|" + QueueState.CanMake + "|" + QueueState.StaminaPaused + "|" +
                   QueueState.DrawerUsed + "|" + QueueState.JustFinishedTaskId + "|" + taskSig.ToString();
         if (sig == _lastSig) return;
