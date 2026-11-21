@@ -1,5 +1,6 @@
 {
   "mcSpec": 2,
+  "suite": true,
   "id": "com.local.survivallog.craftqueue",
   "display": "制作队列",
   "en": "CraftQueue",
