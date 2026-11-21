@@ -26,41 +26,5 @@
       }
     ]
   },
-  "groups": [
-    {
-      "title": "通用",
-      "order": 1,
-      "items": [
-        {
-          "key": "General:Enabled",
-          "label": "启用",
-          "type": "bool",
-          "def": true,
-          "order": 10
-        }
-      ]
-    },
-    {
-      "title": "开发",
-      "order": 2,
-      "items": [
-        {
-          "key": "Dev:VerboseLog",
-          "label": "详细日志",
-          "badge": "dev",
-          "type": "bool",
-          "def": false,
-          "order": 10
-        },
-        {
-          "key": "Dev:SelfTest",
-          "label": "自动自测",
-          "badge": "dev",
-          "type": "bool",
-          "def": false,
-          "order": 20
-        }
-      ]
-    }
-  ]
+  "groups": []
 }

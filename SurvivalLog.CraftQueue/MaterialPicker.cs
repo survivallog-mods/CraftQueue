@@ -159,7 +159,7 @@ internal static class MaterialPicker
         return groups;
     }
 
-    /// <summary>扁平包装（探测/SelfTest 用）：分组结果拍平。</summary>
+    /// <summary>扁平包装（调试用）：分组结果拍平。</summary>
     public static List<long> PickAndReserve(Il2CppSystem.Collections.Generic.List<int> materialIds, int qty, out PickFail fail)
     {
         var flat = new List<long>();

@@ -271,8 +271,7 @@ internal static class QueueUi
             // RP 写 true（同步触发本回调）之前 → 写回必为终值；同帧稍后 webui flush 序列化时
             // 值已是 Idle。
             st.HandMadeState = GameCore.HotUpdate.HandMadeState.Idle;
-            if (CraftQueuePlugin.CfgVerbose.Value)
-                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] 队列弹窗已在推送层掐断");
+            CraftQueuePlugin.Log.LogInfo("[CraftQueue.Ui] 队列弹窗已在推送层掐断");
         }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Ui] 弹窗拦截异常: " + e.Message); }
     }

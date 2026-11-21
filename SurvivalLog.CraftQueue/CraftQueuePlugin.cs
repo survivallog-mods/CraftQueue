@@ -31,20 +31,14 @@ public sealed class CraftQueuePlugin : BasePlugin
     public const string Version = "1.0.0";
 
     internal static new ManualLogSource Log;
-    internal static ConfigEntry<bool> CfgEnabled;
-    internal static ConfigEntry<bool> CfgVerbose;
-    internal static ConfigEntry<bool> CfgSelfTest;
+    internal static ConfigEntry<bool> CfgEnabled; // ModCenter 启停键（不在清单展示）
 
     public override void Load()
     {
         Log = base.Log;
 
         CfgEnabled = Config.Bind("General", "Enabled", true,
-            "总开关：false = 不注册帧循环且零日志零行为，等效卸载");
-        CfgVerbose = Config.Bind("Dev", "VerboseLog", false,
-            "调试：打印取料/派发/收尾详细日志");
-        CfgSelfTest = Config.Bind("Dev", "SelfTest", false,
-            "自测：进档后自动找可做配方入队×2 并全容器取证（跑完一轮自动失效，需重开）");
+            "总开关（ModCenter 启停直写）：false = 不注册帧循环且零日志零行为，等效卸载");
 
         if (!CfgEnabled.Value)
         {
@@ -73,6 +67,5 @@ internal sealed class QueueTicker : MonoBehaviour
     {
         QueueRunner.FastPoll();
         QueueUi.FastPoll();
-        if (CraftQueuePlugin.CfgSelfTest.Value) { SelfTest.FastPoll(); SelfTest.TraceTick(); }
     }
 }

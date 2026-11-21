@@ -129,8 +129,7 @@ internal static class QueueRunner
             // → 冤枉冻结到官方超时（主用例：前台自己做+队列后台跑））
             if (cur == HandMadeState.WaitingReceive || cur == HandMadeState.NoReceive) return;
             w.OnResume();
-            if (CraftQueuePlugin.CfgVerbose.Value)
-                CraftQueuePlugin.Log.LogInfo("[CraftQueue.Runner] 官方完成冻结已同帧抵消");
+            CraftQueuePlugin.Log.LogInfo("[CraftQueue.Runner] 官方完成冻结已同帧抵消");
         }
         catch { }
     }
@@ -372,8 +371,7 @@ internal static class QueueRunner
         foreach (var g in groups) t.ReservedItemIds.AddRange(g);
         QueueState.Add(t);
         QueueState.SyncReservedIds();
-        if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（全量预占 {t.ReservedItemIds.Count} 件/{groups.Count} 份已锁抽屉）");
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 入队 #{t.TaskId} {t.ProductName}×{qty}（全量预占 {t.ReservedItemIds.Count} 件/{groups.Count} 份已锁抽屉）");
         return true;
     }
 
@@ -433,8 +431,7 @@ internal static class QueueRunner
             t.ReservedItemIds.Clear();            // 预占已废（料不在抽屉）
             t.ReserveGroups.Clear();
             QueueState.SyncReservedIds();
-            if (CraftQueuePlugin.CfgVerbose.Value)
-                CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 预占物品丢失 → Blocked");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] #{t.TaskId} 预占物品丢失 → Blocked");
             return;
         }
         // 本件一份=组[0]（入队时按份分组选料，终审 P1：分组保证每份可整件消耗——官方按整实例销毁）
@@ -457,8 +454,7 @@ internal static class QueueRunner
         _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
         _preProductIds = t.ProductIconId > 0 && !t.IsFurniture ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：完成后 diff（官方同款模式）
         t.Status = TaskStatus.Dispatched;
-        if (CraftQueuePlugin.CfgVerbose.Value)
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId}（本件 {one.Count} 件，剩余预占 {t.ReservedItemIds.Count}）→ 家具 0x{furn:X}");
+        CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId}（本件 {one.Count} 件，剩余预占 {t.ReservedItemIds.Count}）→ 家具 0x{furn:X}");
     }
 
 
