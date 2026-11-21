@@ -26,9 +26,10 @@
 ## 3. 实机定案（2026-11-19 全自动闭环验证）
 
 - **台面（备料格）= bag 1010，owner 为独立 id**（官方 State_Web_ToolTable.WorkbenchOwnerId），
-  非家具 InstanceId——家具 id 查台面恒空。入队/收尾一律走 WorkbenchOwnerId。
-- **成品去向**：官方 TryCreateItem 产物进玩家背包→游戏机器人按标签归置进柜子/抽屉（比 0.5s
-  轮询更快）。队列收尾=背包抢搬抽屉，抢不过则接受归置（日志记去向）；成品不丢。
+  非家具 InstanceId——家具 id 查台面恒空。入队/台面搬运走 WorkbenchOwnerId。
+- **成品去向**：官方 TryCreateItem 同步写进工作台家具自身的储物格（`Config_Furniture.BagId`，
+  owner=家具 InstanceId；普通成品与家具包裹同一写入位）。队列收尾=完成帧在该容器做单容器
+  id 快照 diff → 普通成品搬抽屉 / 家具包裹拆到玄关；成品不丢。
 - **官方制作遮罩/成品弹窗为全局单例**（不分台）：队列在制时 CSS 级压制（js cq-force-style）
   + C# 清 IsCrafting/ResultShow 双保险；玩家自己点官方「制造」有 4s 前台保护窗。
 - **自动化回归**：`.auto/cq_uiverify.js`（CDP 全流程：点配方→入队→面板→压制断言）+
@@ -74,7 +75,8 @@
   `State==Idle 且台面无遗留物` 的家具 → `StartProduction(furn, ids)`（void，拒绝靠下一轮
   State 仍 Idle 判定，1s 窗口；`GetCraftStamina` 区分精力不足挂起 vs 校验失败 Blocked）。
 - 收尾：`GetToolTableState≥WaitingReceive` → 台面成品 `TryQuickMoveItems` 入抽屉 → 残留
-  `DropItemManager.DropItemFromBag` 逐件落地（家具包裹官方直送玄关、台面无物自然跳过）→
+  `DropItemManager.DropItemFromBag` 逐件落地；家具包裹走同款单容器 diff（工作台储物格）→ 代发官方
+  `UnpackPackagesToEntrance` 拆到玄关（玄关满/投递失败=包裹转抽屉可手动拆封，抽屉满落地）→
   **直写 `ToolTableData.State=0`+清 CachedItemIds 复位**（官方复位在 notify 订阅方/UI 层，
   队列侧等价复位；Il2CppInterop 私有成员可达）→ `Left--`，>0 重取料回 Queued。
 - 取消 Dispatched：`ForceEndProduction` + 直写复位；料留抽屉（预占解除）。

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using GameCore.HotUpdate;
 using GameCore.HotUpdate.Battle.Logic;
-using GameCore.HotUpdate.ReduxUI;
 
 namespace SurvivalLog.CraftQueue;
 
@@ -452,7 +451,7 @@ internal static class QueueRunner
         _busyFurnId = furn;
         _dispatchTick = 0;
         _lastQueueActivityAt = UnityEngine.Time.unscaledTime;
-        _preProductIds = t.ProductIconId > 0 && !t.IsFurniture ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：完成后 diff（官方同款模式）
+        _preProductIds = t.ProductIconId > 0 ? ScanProductIds(t.ProductIconId, furn) : null;   // 单容器快照：官方写入位=队列台（家具包裹同）
         t.Status = TaskStatus.Dispatched;
         CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 派发 #{t.TaskId}（本件 {one.Count} 件，剩余预占 {t.ReservedItemIds.Count}）→ 家具 0x{furn:X}");
     }
@@ -616,7 +615,16 @@ internal static class QueueRunner
     /// </summary>
     private static void CollectProducts(CraftTask t, long furnId)
     {
-        if (t.IsFurniture || t.ProductIconId <= 0) return;      // 家具包裹：官方直送玄关
+        if (t.ProductIconId <= 0) return;
+        // 家具包裹：官方 TryCreateItem 只把它写进工作台自带储物格（Config_Furniture.BagId），
+        // 「拆到玄关」是成品弹窗里的玩家动作（TryDeliverPackageToEntrance 唯一入口=
+        // UnpackPackagesToEntrance）——队列跳过官方收下/弹窗，必须代发这一步，否则包裹
+        // 永远留在工作台储物格里（玩家查抽屉/玄关都没有=丢失，2026-11-21 用户实测）。
+        if (t.IsFurniture)
+        {
+            CollectFurniturePackages(t, furnId);
+            return;
+        }
         var cur = ScanProductIds(t.ProductIconId, furnId);
         var fresh = new List<long>();
         var owners = new Dictionary<long, long>();
@@ -628,7 +636,7 @@ internal static class QueueRunner
         }
         if (fresh.Count == 0)
         {
-            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品 #{t.ProductIconId} 无新增实例（家具包裹已在玄关/官方未产出），去向日志见上轮取证");
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品 #{t.ProductIconId} 无新增实例（官方未产出/已被取走），去向日志见上轮取证");
             return;
         }
         // 按 owner 分组搬进抽屉
@@ -664,30 +672,81 @@ internal static class QueueRunner
         CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 成品入抽屉 ×{movedTotal}" + (droppedTotal > 0 ? $"，抽屉满落地 ×{droppedTotal}" : ""));
     }
 
-    /// <summary>扫描某 configId：id → 所在 owner。owner>0=单容器（队列台，官方同款快照/diff 模式）；
-    /// owner=0=全容器（仅诊断用）。</summary>
-    private static Dictionary<long, long> ScanProductIds(int configId, long ownerOnly)
+    /// <summary>
+    /// 家具包裹收尾：单容器 diff 找新增包裹（官方 TryCreateItem 同步写进工作台家具的储物格，
+    /// 与普通成品同一写入位），代发官方「拆到玄关」（UnpackPackagesToEntrance=该按钮唯一入口，
+    /// 家具生成到玄关并移除包裹）。玄关满/投递失败=包裹仍在世界内 → 搬工作台抽屉（可手动
+    /// 拆封），抽屉满逐件落地——绝不留在工作台储物格 / 静默丢失。
+    /// </summary>
+    private static void CollectFurniturePackages(CraftTask t, long furnId)
+    {
+        var fresh = new List<long>();
+        foreach (var kv in ScanProductIds(t.ProductIconId, furnId))
+        {
+            if (_preProductIds != null && _preProductIds.ContainsKey(kv.Key)) continue;
+            fresh.Add(kv.Key);
+        }
+        if (fresh.Count == 0)
+        {
+            CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 家具包裹 #{t.ProductIconId} 无新增实例（官方未产出/已被取走）");
+            return;
+        }
+        int room = 0;
+        try { room = TTM().GetEntranceRoom(); } catch { }
+        int ok = 0;
+        if (room > 0)
+        {
+            var deliver = new List<long>();
+            for (int i = 0; i < fresh.Count && i < room; i++) deliver.Add(fresh[i]);
+            try { ok = TTM().UnpackPackagesToEntrance(ToIl2Cpp(deliver)); }
+            catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 家具包裹投递异常: " + e.Message); }
+        }
+        if (ok >= fresh.Count)
+        {
+            CraftQueuePlugin.Log.LogInfo($"[CraftQueue.Runner] 家具包裹 #{t.ProductIconId} 拆到玄关 ×{ok}");
+            return;
+        }
+        // 剩余（玄关满/投递失败/官方已移除但计数不含）：按现 owner 搬抽屉，满则落地
+        var im = IM();
+        var byOwner = new Dictionary<long, List<long>>();
+        foreach (var id in fresh)
+        {
+            try
+            {
+                var it = im.GetItemData(id);
+                if (it == null) continue;
+                if (!byOwner.TryGetValue(it.OwnerId, out var list)) byOwner[it.OwnerId] = list = new List<long>();
+                list.Add(id);
+            }
+            catch { }
+        }
+        var drawerOwner = DrawerOwner();
+        int movedTotal = 0, droppedTotal = 0;
+        foreach (var g in byOwner)
+        {
+            int moved = 0;
+            try { moved = im.TryQuickMoveItems(ToIl2Cpp(g.Value), g.Key, drawerOwner, true); } catch { }
+            movedTotal += moved;
+            if (moved == g.Value.Count) continue;
+            var dim = DIM();
+            foreach (var id in g.Value)
+                try { if (im.GetItemData(id) != null && dim.DropItemFromBag(id)) droppedTotal++; } catch { }
+        }
+        CraftQueuePlugin.Log.LogWarning($"[CraftQueue.Runner] 家具包裹 #{t.ProductIconId} 拆到玄关 ×{ok}，{fresh.Count - ok} 件未投递（玄关满/失败），转抽屉 ×{movedTotal}" + (droppedTotal > 0 ? $"，落地 ×{droppedTotal}" : ""));
+    }
+
+    /// <summary>扫描某 owner 容器内某 configId 的实例：id → owner（单容器直查，不依赖 BagCache）。</summary>
+    private static Dictionary<long, long> ScanProductIds(int configId, long owner)
     {
         var result = new Dictionary<long, long>();
+        var im = IM();
+        if (im == null) return result;
         try
         {
-            var rus = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ReduxUI.ReduxUISystem>.Instance;
-            GameCore.HotUpdate.ReduxUI.BaseReduxState raw = null;
-            rus?.reduxStoreLayer?.dataTree?.TryGetValue(
-                Il2CppInterop.Runtime.Il2CppType.From(typeof(GameCore.HotUpdate.ReduxUI.State_Data_Item)), out raw);
-            var bagCache = raw?.TryCast<GameCore.HotUpdate.ReduxUI.State_Data_Item>()?.BagCache;
-            var im = IM();
-            if (bagCache == null || im == null) return result;
-            foreach (var kv in bagCache)
-            {
-                if (ownerOnly != 0 && kv.Key != ownerOnly) continue;
-                var lst = im.GetItemDataList(kv.Key);
-                if (lst == null) continue;
+            var lst = im.GetItemDataList(owner);
+            if (lst != null)
                 for (int i = 0; i < lst.Count; i++)
-                {
-                    try { if (lst[i].ItemConfigId == configId) result[lst[i].InstanceId] = kv.Key; } catch { }
-                }
-            }
+                    try { if (lst[i].ItemConfigId == configId) result[lst[i].InstanceId] = owner; } catch { }
         }
         catch (Exception e) { CraftQueuePlugin.Log.LogWarning("[CraftQueue.Runner] 成品扫描异常: " + e.Message); }
         return result;
