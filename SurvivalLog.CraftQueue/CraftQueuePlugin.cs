@@ -28,7 +28,7 @@ public sealed class CraftQueuePlugin : BasePlugin
 {
     public const string Guid = "com.local.survivallog.craftqueue";
     public const string Name = "CraftQueue";
-    public const string Version = "1.0.0";
+    public const string Version = "1.0.1";
 
     internal static new ManualLogSource Log;
     internal static ConfigEntry<bool> CfgEnabled; // ModCenter 启停键（不在清单展示）
