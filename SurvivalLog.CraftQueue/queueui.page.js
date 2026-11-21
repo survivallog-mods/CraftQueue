@@ -10,7 +10,7 @@
         '.cq-head-btn:hover{background:rgba(255,193,7,.12);border-color:#FFC107;box-shadow:0 0 10px rgba(255,193,7,.28)}',
         '.cq-badge{min-width:16px;height:16px;border-radius:8px;padding:0 4px;background:#FFC107;color:#241a02;font-size:11px;font-weight:700;display:inline-flex;align-items:center;justify-content:center}',
         '.cq-badge.zero{background:rgba(255,193,7,.15);color:#FFC107}',
-        '.cq-enqueue{color:#FFC107;border-color:rgba(255,193,7,.5);background:rgba(255,193,7,.06);font-weight:600;padding:8px 13px;font-size:12.5px;flex:none;white-space:nowrap}',
+        '.cq-enqueue{color:#FFC107;border-color:rgba(255,193,7,.5);background:rgba(255,193,7,.06);font-weight:600;padding:8px 13px;font-size:12.5px;flex:none;white-space:nowrap;visibility:visible}',
         '.cq-enqueue:hover{background:rgba(255,193,7,.14);border-color:#FFC107;color:#ffd75e}',
         '.cq-panel{position:fixed;right:14px;top:50%;transform:translateY(-50%);width:290px;max-height:76vh;z-index:60;background:linear-gradient(168deg,rgba(34,34,36,.96),rgba(20,20,22,.97));border:1px solid rgba(255,193,7,.35);border-radius:14px;box-shadow:0 16px 50px rgba(0,0,0,.65);display:none;flex-direction:column;overflow:hidden;font-family:"Microsoft YaHei",sans-serif}',
         '.cq-panel.open{display:flex}',
